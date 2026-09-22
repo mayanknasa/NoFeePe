@@ -21,8 +21,12 @@ describe('UPI URI Handling (Section 6)', () => {
     expect(() => parseUpiUri('https://example.com/pay')).toThrow(UpiParseError);
     try {
       parseUpiUri('https://example.com/pay');
-    } catch (e: any) {
-      expect(e.code).toBe('NOT_UPI_URI');
+    } catch (e: unknown) {
+      if (e instanceof UpiParseError) {
+        expect(e.code).toBe('NOT_UPI_URI');
+      } else {
+        throw e;
+      }
     }
   });
 
@@ -30,8 +34,12 @@ describe('UPI URI Handling (Section 6)', () => {
     expect(() => parseUpiUri('upi://pay?pn=Sharma')).toThrow(UpiParseError);
     try {
       parseUpiUri('upi://pay?pn=Sharma');
-    } catch (e: any) {
-      expect(e.code).toBe('MISSING_PA');
+    } catch (e: unknown) {
+      if (e instanceof UpiParseError) {
+        expect(e.code).toBe('MISSING_PA');
+      } else {
+        throw e;
+      }
     }
   });
 
@@ -39,8 +47,12 @@ describe('UPI URI Handling (Section 6)', () => {
     expect(() => parseUpiUri('upi://pay?pa=invalid_vpa_without_handle')).toThrow(UpiParseError);
     try {
       parseUpiUri('upi://pay?pa=invalid_vpa_without_handle');
-    } catch (e: any) {
-      expect(e.code).toBe('INVALID_PA');
+    } catch (e: unknown) {
+      if (e instanceof UpiParseError) {
+        expect(e.code).toBe('INVALID_PA');
+      } else {
+        throw e;
+      }
     }
   });
 
@@ -122,8 +134,12 @@ describe('UPI URI Handling (Section 6)', () => {
         originalVpa: 'user@okhdfcbank',
         amountPaise: 10000,
       });
-    } catch (e: any) {
-      expect(e.code).toBe('TAMPERING_DETECTED');
+    } catch (e: unknown) {
+      if (e instanceof UpiParseError) {
+        expect(e.code).toBe('TAMPERING_DETECTED');
+      } else {
+        throw e;
+      }
     }
   });
 
@@ -132,5 +148,17 @@ describe('UPI URI Handling (Section 6)', () => {
     expect(maskVpa('mayank@upi')).toBe('may••••@upi');
     expect(maskVpa('ab@okaxis')).toBe('ab••••@okaxis');
     expect(maskVpa('abc@okaxis')).toBe('abc••••@okaxis');
+  });
+
+  test('generateTransactionRef creates unique 35-char NFP references', () => {
+    const ref1 = generateTransactionRef();
+    const ref2 = generateTransactionRef();
+
+    expect(ref1).toHaveLength(35);
+    expect(ref2).toHaveLength(35);
+    expect(ref1.startsWith('NFP')).toBe(true);
+    expect(ref2.startsWith('NFP')).toBe(true);
+    expect(ref1).not.toBe(ref2);
+    expect(/^NFP[0-9A-F]{32}$/.test(ref1)).toBe(true);
   });
 });

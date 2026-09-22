@@ -1,12 +1,12 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   TouchableOpacity,
-  SafeAreaView,
   ScrollView,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import ReactNativeHapticFeedback from 'react-native-haptic-feedback';
 
@@ -17,46 +17,74 @@ import { useSessionStore } from '../store/sessionStore';
 import { colors, radii, spacing, typography } from '../theme/tokens';
 import { GlassCard } from '../components/GlassCard';
 import { GradientButton } from '../components/GradientButton';
+import { BackButton } from '../components/BackButton';
 import { formatIndianCurrency } from '../components/AmountText';
+import { AppIcon } from '../components/AppIcon';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Method'>;
 
+/**
+ * Payment Method Selection Screen.
+ * Implements Section 4.4 of AGENTS.md:
+ * - Direct Pay: single transaction for the full amount.
+ * - Split & Pay: headline feature dividing transactions > Rs 1,999 into sub-cap installments
+ *   (each <= Rs 1,999.00) to eliminate merchant interchange fees.
+ * - Live dynamic split preview computed from entered amount.
+ * - Collapsible 'What is Split & Pay?' educational explainer.
+ */
 export const MethodScreen: React.FC<Props> = ({ navigation }) => {
-  const session = useSessionStore();
+  const insets = useSafeAreaInsets();
+  const totalPaise = useSessionStore((state) => state.totalPaise);
+  const payeeVpa = useSessionStore((state) => state.payeeVpa);
+  const payeeName = useSessionStore((state) => state.payeeName);
+  const merchantCode = useSessionStore((state) => state.merchantCode);
+  const transactionNote = useSessionStore((state) => state.transactionNote);
+  const signature = useSessionStore((state) => state.signature);
   const initSession = useSessionStore((state) => state.initSession);
 
-  // Read amount and payee from session store or route
-  const totalPaise = session.totalPaise;
-  const payeeVpa = session.payeeVpa;
-  const payeeName = session.payeeName;
-  const isFixedAmount = !!session.signature && totalPaise > 0; // or fixed am
-
-  const isSplitEligible = totalPaise > 199900 && !isFixedAmount;
+  const isFixedAmount = !!signature && totalPaise > 0;
 
   // Compute live split preview
-  const splitPlanResult = useMemo(() => {
-    if (!isSplitEligible) return null;
-    try {
-      return planSplit(totalPaise);
-    } catch (err) {
-      return null;
+  const { splitPlanResult, splitPlanError } = useMemo(() => {
+    if (totalPaise <= 199900 || isFixedAmount) {
+      return { splitPlanResult: null, splitPlanError: null };
     }
-  }, [totalPaise, isSplitEligible]);
+    try {
+      return { splitPlanResult: planSplit(totalPaise), splitPlanError: null };
+    } catch (err: unknown) {
+      return {
+        splitPlanResult: null,
+        splitPlanError:
+          err instanceof SplitError
+            ? err.message
+            : err instanceof Error
+            ? err.message
+            : 'Unable to split this amount',
+      };
+    }
+  }, [totalPaise, isFixedAmount]);
+
+  const isSplitEligible = totalPaise > 199900 && !isFixedAmount && !!splitPlanResult;
 
   const splitPreviewText = useMemo(() => {
-    if (!splitPlanResult) return null;
-    const fullLegCount = splitPlanResult.legs.filter((l) => l === 199900).length;
-    const remainderLeg = splitPlanResult.legs.find((l) => l !== 199900);
+    if (!splitPlanResult?.legs) return null;
+    try {
+      const fullLegCount = splitPlanResult.legs.filter((l) => l === 199900).length;
+      const remainderLegs = splitPlanResult.legs.filter((l) => l !== 199900);
 
-    const parts: string[] = [];
-    if (fullLegCount > 0) {
-      parts.push(`${fullLegCount} x ₹1,999.00`);
-    }
-    if (remainderLeg) {
-      parts.push(`₹${(remainderLeg / 100).toFixed(2)}`);
-    }
+      const parts: string[] = [];
+      if (fullLegCount > 0) {
+        parts.push(`${fullLegCount} x ₹1,999.00`);
+      }
+      remainderLegs.forEach((r) => {
+        parts.push(`₹${((r ?? 0) / 100).toFixed(2)}`);
+      });
 
-    return `${splitPlanResult.count} payments: ${parts.join(' + ')}`;
+      return `${splitPlanResult.count} payments: ${parts.join(' + ')}`;
+    } catch (err: unknown) {
+      console.warn('[MethodScreen] splitPreviewText computation error:', err);
+      return null;
+    }
   }, [splitPlanResult]);
 
   const disabledReason = useMemo(() => {
@@ -66,13 +94,21 @@ export const MethodScreen: React.FC<Props> = ({ navigation }) => {
     if (totalPaise <= 199900) {
       return 'Available for bills above Rs 1,999.00';
     }
+    if (splitPlanError) {
+      return splitPlanError;
+    }
     return null;
-  }, [isFixedAmount, totalPaise]);
+  }, [isFixedAmount, totalPaise, splitPlanError]);
 
   // Default mode: split if available, otherwise direct
   const [selectedMode, setSelectedMode] = useState<PaymentMode>(
     isSplitEligible ? 'split' : 'direct'
   );
+
+  useEffect(() => {
+    setSelectedMode(isSplitEligible ? 'split' : 'direct');
+  }, [isSplitEligible]);
+
   const [showExplainer, setShowExplainer] = useState(false);
 
   const handleSelectMode = (mode: PaymentMode) => {
@@ -82,7 +118,9 @@ export const MethodScreen: React.FC<Props> = ({ navigation }) => {
       ReactNativeHapticFeedback.trigger('selection', {
         enableVibrateFallback: true,
       });
-    } catch {}
+    } catch (err: unknown) {
+      console.debug?.('[MethodScreen] Haptic error:', err);
+    }
 
     setSelectedMode(mode);
   };
@@ -92,448 +130,431 @@ export const MethodScreen: React.FC<Props> = ({ navigation }) => {
       ReactNativeHapticFeedback.trigger('impactMedium', {
         enableVibrateFallback: true,
       });
-    } catch {}
-
-    let plannedLegs: number[] = [];
-    if (selectedMode === 'split' && splitPlanResult) {
-      plannedLegs = splitPlanResult.legs;
-    } else {
-      plannedLegs = [totalPaise];
+    } catch (err: unknown) {
+      console.debug?.('[MethodScreen] Haptic error:', err);
     }
 
-    initSession({
-      payeeVpa: session.payeeVpa,
-      payeeName: session.payeeName,
-      merchantCode: session.merchantCode,
-      transactionNote: session.transactionNote,
-      signature: session.signature,
-      totalPaise: session.totalPaise,
-      mode: selectedMode,
-      legs: plannedLegs,
-    });
+    try {
+      let legs: number[] = [totalPaise];
+      if (selectedMode === 'split' && splitPlanResult?.legs) {
+        legs = splitPlanResult.legs;
+      }
 
-    navigation.navigate('Pay');
+      // Update session store with finalized mode and legs
+      initSession?.({
+        payeeVpa: payeeVpa ?? '',
+        payeeName: payeeName ?? null,
+        merchantCode: merchantCode ?? null,
+        transactionNote: transactionNote ?? null,
+        signature: signature ?? null,
+        totalPaise,
+        mode: selectedMode,
+        legs,
+      });
+
+      // Navigate to Pay screen
+      navigation?.navigate?.('Pay');
+    } catch (err: unknown) {
+      console.warn('[MethodScreen] handleProceed error:', err);
+    }
   };
 
   const totalFormatted = formatIndianCurrency(totalPaise);
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <View style={styles.container}>
-        {/* Header */}
-        <View style={styles.header}>
+    <View
+      style={[
+        styles.container,
+        {
+          paddingTop: insets.top + spacing.sm,
+          paddingBottom: Math.max(insets.bottom, 16) + spacing.xs,
+        },
+      ]}
+    >
+      {/* Header */}
+      <View style={styles.header}>
+        <BackButton
+          onPress={() => {
+            try {
+              navigation?.goBack?.();
+            } catch (err: unknown) {
+              console.warn('[MethodScreen] Back error:', err);
+            }
+          }}
+        />
+        <Text style={styles.headerTitle}>Select Method</Text>
+        <View style={styles.backPlaceholder} />
+      </View>
+
+      <ScrollView contentContainerStyle={styles.scrollContent} bounces={false}>
+        {/* Total Bill Summary Card */}
+        <GlassCard style={styles.summaryCard}>
+          <Text style={styles.summaryLabel}>TOTAL AMOUNT TO PAY</Text>
+          <View style={styles.amountDisplay}>
+            <Text style={styles.currencySymbol}>₹</Text>
+            <Text style={styles.amountNumber}>{totalFormatted.rupeePart}</Text>
+            <Text style={styles.amountDecimals}>.{totalFormatted.decimalPart}</Text>
+          </View>
+          <Text style={styles.payeeSubtext} numberOfLines={1}>
+            To: {payeeName || maskVpa(payeeVpa)}
+          </Text>
+        </GlassCard>
+
+        {/* Method Selection Cards */}
+        <View style={styles.cardsContainer}>
+          {/* Split & Pay Card */}
           <TouchableOpacity
-            activeOpacity={0.7}
-            onPress={() => navigation.goBack()}
-            style={styles.backButton}
+            activeOpacity={isSplitEligible ? 0.85 : 1}
+            onPress={() => handleSelectMode('split')}
+            disabled={!isSplitEligible}
           >
-            <Text style={styles.backIcon}>←</Text>
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>Payment Mode</Text>
-          <View style={styles.headerRightPlaceholder} />
-        </View>
+            <GlassCard
+              elevated={selectedMode === 'split'}
+              style={[
+                styles.methodCard,
+                selectedMode === 'split' && styles.selectedMethodCard,
+                !isSplitEligible && styles.disabledMethodCard,
+              ]}
+            >
+              <View style={styles.cardHeader}>
+                <View style={styles.badgeRow}>
+                  <View style={styles.headlinePill}>
+                    <Text style={styles.headlinePillText}>⭐ RECOMMENDED</Text>
+                  </View>
+                  {isSplitEligible && (
+                    <View style={styles.zeroFeePill}>
+                      <Text style={styles.zeroFeePillText}>ZERO MDR</Text>
+                    </View>
+                  )}
+                </View>
 
-        <ScrollView contentContainerStyle={styles.scrollContent}>
-          {/* Target Amount Card */}
-          <GlassCard style={styles.amountCard}>
-            <View style={styles.amountHeader}>
-              <View>
-                <Text numberOfLines={1} style={styles.payeeName}>
-                  {payeeName || 'Merchant'}
-                </Text>
-                <Text style={styles.payeeVpa}>{maskVpa(payeeVpa)}</Text>
+                <View
+                  style={[
+                    styles.radio,
+                    selectedMode === 'split' && styles.radioSelected,
+                    !isSplitEligible && styles.radioDisabled,
+                  ]}
+                >
+                  {selectedMode === 'split' && <View style={styles.radioDot} />}
+                </View>
               </View>
-              <View style={styles.verifiedBadge}>
-                <Text style={styles.verifiedText}>Verified</Text>
-              </View>
-            </View>
 
-            <View style={styles.totalRow}>
-              <Text style={styles.totalLabel}>TOTAL TO PAY</Text>
-              <Text style={styles.totalValue}>
-                ₹{totalFormatted.rupeePart}.{totalFormatted.decimalPart}
+              <Text style={styles.cardTitle}>Split & Pay</Text>
+              <Text style={styles.cardSubtitle}>
+                Pay in instalments capped at ₹1,999.00 each. Eliminates merchant MDR charges entirely.
               </Text>
-            </View>
-          </GlassCard>
 
-          <Text style={styles.sectionHeader}>SELECT ROUTING MODE</Text>
+              {/* Dynamic split preview text */}
+              {isSplitEligible && splitPreviewText && (
+                <View style={styles.previewContainer}>
+                  <Text style={styles.previewLabel}>SCHEDULE</Text>
+                  <Text style={styles.previewText}>{splitPreviewText}</Text>
+                </View>
+              )}
 
-          {/* Option 1: Pay Direct (Always Enabled per Section 4.4) */}
+              {/* Disabled Explanation */}
+              {!isSplitEligible && disabledReason && (
+                <View style={styles.disabledReasonContainer}>
+                  <AppIcon name="info" size={14} color="#8E92A8" />
+                  <Text style={styles.disabledReasonText}>{disabledReason}</Text>
+                </View>
+              )}
+            </GlassCard>
+          </TouchableOpacity>
+
+          {/* Pay Direct Card */}
           <TouchableOpacity
-            activeOpacity={0.8}
+            activeOpacity={0.85}
             onPress={() => handleSelectMode('direct')}
           >
             <GlassCard
               elevated={selectedMode === 'direct'}
-              borderColor={
-                selectedMode === 'direct' ? colors.accentStart : colors.glassBorder
-              }
-              style={styles.modeCard}
-            >
-              <View style={styles.modeCardHeader}>
-                <View style={styles.modeCardTitleRow}>
-                  <View
-                    style={[
-                      styles.radioOuter,
-                      selectedMode === 'direct' && styles.radioOuterSelected,
-                    ]}
-                  >
-                    {selectedMode === 'direct' && <View style={styles.radioInner} />}
-                  </View>
-                  <View>
-                    <View style={styles.titleBadgeRow}>
-                      <Text style={styles.modeTitle}>Pay Direct</Text>
-                      <View style={styles.standardPill}>
-                        <Text style={styles.standardPillText}>Standard</Text>
-                      </View>
-                    </View>
-                    <Text style={styles.modeSubtitle}>
-                      Pay ₹{totalFormatted.rupeePart}.{totalFormatted.decimalPart} in a single standard transaction.
-                    </Text>
-                  </View>
-                </View>
-              </View>
-            </GlassCard>
-          </TouchableOpacity>
-
-          {/* Option 2: Split & Pay (Enabled if > Rs 1999 and not fixed) */}
-          <TouchableOpacity
-            activeOpacity={isSplitEligible ? 0.8 : 1}
-            onPress={() => handleSelectMode('split')}
-          >
-            <GlassCard
-              elevated={selectedMode === 'split'}
-              borderColor={
-                selectedMode === 'split' ? colors.accentEnd : colors.glassBorder
-              }
               style={[
-                styles.modeCard,
-                !isSplitEligible && styles.modeCardDisabled,
+                styles.methodCard,
+                selectedMode === 'direct' && styles.selectedMethodCard,
               ]}
             >
-              <View style={styles.modeCardHeader}>
-                <View style={styles.modeCardTitleRow}>
-                  <View
-                    style={[
-                      styles.radioOuter,
-                      selectedMode === 'split' && styles.radioOuterSelected,
-                    ]}
-                  >
-                    {selectedMode === 'split' && <View style={styles.radioInner} />}
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <View style={styles.titleBadgeRow}>
-                      <Text
-                        style={[
-                          styles.modeTitle,
-                          !isSplitEligible && styles.textDisabled,
-                        ]}
-                      >
-                        Split & Pay
-                      </Text>
-                      {isSplitEligible && (
-                        <View style={styles.recommendedPill}>
-                          <Text style={styles.recommendedPillText}>
-                            Zero MDR
-                          </Text>
-                        </View>
-                      )}
-                    </View>
-
-                    {isSplitEligible ? (
-                      <>
-                        <Text style={styles.modeSubtitle}>
-                          Auto-split into micro-transactions under Rs 1,999 to bypass processor fees and daily limits.
-                        </Text>
-                        {/* Preview Line per Section 4.4 */}
-                        {splitPreviewText && (
-                          <View style={styles.previewContainer}>
-                            <Text style={styles.previewText}>
-                              ⚡ {splitPreviewText}
-                            </Text>
-                          </View>
-                        )}
-                      </>
-                    ) : (
-                      /* Reason shown if disabled per Section 4.4 */
-                      <Text style={styles.disabledReasonText}>
-                        {disabledReason}
-                      </Text>
-                    )}
-                  </View>
+              <View style={styles.cardHeader}>
+                <Text style={styles.standardLabel}>STANDARD</Text>
+                <View
+                  style={[
+                    styles.radio,
+                    selectedMode === 'direct' && styles.radioSelected,
+                  ]}
+                >
+                  {selectedMode === 'direct' && <View style={styles.radioDot} />}
                 </View>
               </View>
+
+              <Text style={styles.cardTitle}>Pay Direct</Text>
+              <Text style={styles.cardSubtitle}>
+                One single transaction for the entire ₹{totalFormatted.rupeePart}.{totalFormatted.decimalPart}.
+              </Text>
             </GlassCard>
           </TouchableOpacity>
+        </View>
 
-          {/* Collapsible Explainer Chip per Section 4.4 */}
+        {/* Collapsible Explainer per Section 4.4 */}
+        <View style={styles.explainerWrapper}>
           <TouchableOpacity
             activeOpacity={0.7}
-            onPress={() => setShowExplainer(!showExplainer)}
+            onPress={() => {
+              try {
+                ReactNativeHapticFeedback.trigger('selection');
+              } catch {}
+              setShowExplainer(!showExplainer);
+            }}
             style={styles.explainerChip}
           >
-            <Text style={styles.explainerIcon}>ℹ️</Text>
-            <Text style={styles.explainerText}>What is Split & Pay?</Text>
-            <Text style={styles.explainerChevron}>{showExplainer ? '▲' : '▼'}</Text>
+            <Text style={styles.explainerChipText}>
+              {showExplainer ? 'Hide explanation ▲' : 'What is Split & Pay? ▼'}
+            </Text>
           </TouchableOpacity>
 
           {showExplainer && (
-            <GlassCard style={styles.explainerContent}>
+            <GlassCard style={styles.explainerBody}>
               <Text style={styles.explainerParagraph}>
-                noFeePe will send several separate payments to the same UPI ID,
-                one after another, capped at ₹1,999.00 each.
+                NoFeePe automatically breaks large amounts into consecutive payments capped at ₹1,999.00 each to the same merchant.
               </Text>
-              <Text style={[styles.explainerParagraph, { marginTop: spacing.xs }]}>
-                You must authorize each payment in your chosen UPI app. Completed
-                payments cannot be reversed by noFeePe.
+              <Text style={[styles.explainerParagraph, { marginTop: spacing.sm }]}>
+                NPCI guidelines allow zero MDR on transactions up to ₹2,000. You will approve each instalment consecutively in your chosen UPI app.
               </Text>
             </GlassCard>
           )}
-        </ScrollView>
-
-        {/* CTA Bottom Button */}
-        <View style={styles.ctaContainer}>
-          <GradientButton
-            label={`Proceed with ${selectedMode === 'split' ? 'Split & Pay' : 'Pay Direct'}`}
-            onPress={handleProceed}
-          />
         </View>
+      </ScrollView>
+
+      {/* Primary Proceed Action */}
+      <View style={styles.footer}>
+        <GradientButton
+          label={
+            selectedMode === 'split' && splitPlanResult
+              ? `Proceed with ${splitPlanResult.count} Payments`
+              : 'Proceed with Direct Payment'
+          }
+          onPress={handleProceed}
+          variant="primary"
+        />
       </View>
-    </SafeAreaView>
+    </View>
   );
 };
 
 const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: colors.bgBase,
-  },
   container: {
     flex: 1,
-    paddingHorizontal: spacing.lg,
-    justifyContent: 'space-between',
-    paddingBottom: spacing.lg,
+    backgroundColor: '#07070B',
+    paddingHorizontal: spacing.md,
   },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingVertical: spacing.md,
-  },
-  backButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: colors.glassFill,
-    borderWidth: 1,
-    borderColor: colors.glassBorder,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  backIcon: {
-    color: colors.textPrimary,
-    fontSize: 20,
-    fontWeight: '700',
+    paddingVertical: spacing.xs,
+    marginBottom: spacing.xs,
   },
   headerTitle: {
-    ...typography.title,
-    fontSize: 16,
+    ...typography.headingSm,
+    color: colors?.textPrimary ?? '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 18,
   },
-  headerRightPlaceholder: {
+  backPlaceholder: {
     width: 40,
   },
   scrollContent: {
+    paddingBottom: spacing.xxl,
+  },
+  summaryCard: {
+    paddingVertical: spacing.lg,
+    paddingHorizontal: spacing.md,
+    alignItems: 'center',
+    marginBottom: spacing.lg,
+  },
+  summaryLabel: {
+    ...typography.captionMedium,
+    color: colors?.textMuted ?? '#8E92A8',
+    letterSpacing: 1.2,
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  amountDisplay: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    marginVertical: spacing.xs,
+  },
+  currencySymbol: {
+    ...typography.currencyDisplay,
+    fontSize: 24,
+    color: colors?.textMuted ?? '#8E92A8',
+    marginRight: 4,
+  },
+  amountNumber: {
+    ...typography.currencyDisplay,
+    fontSize: 38,
+    color: colors?.textPrimary ?? '#FFFFFF',
+    fontWeight: '700',
+  },
+  amountDecimals: {
+    ...typography.currencyDisplay,
+    fontSize: 24,
+    color: colors?.textPrimary ?? '#FFFFFF',
+    fontWeight: '600',
+  },
+  payeeSubtext: {
+    ...typography.caption,
+    color: colors?.textMuted ?? '#8E92A8',
+  },
+  cardsContainer: {
     gap: spacing.md,
-    paddingBottom: spacing.xl,
   },
-  amountCard: {
-    padding: spacing.md + 2,
+  methodCard: {
+    padding: spacing.lg,
+    borderColor: colors?.glassBorder ?? 'rgba(255, 255, 255, 0.08)',
+    borderWidth: 1.5,
   },
-  amountHeader: {
+  selectedMethodCard: {
+    borderColor: colors?.accentStart ?? '#00F5A0',
+    backgroundColor: 'rgba(0, 245, 160, 0.04)',
+  },
+  disabledMethodCard: {
+    opacity: 0.55,
+  },
+  cardHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(255, 255, 255, 0.06)',
-    paddingBottom: spacing.sm,
+    alignItems: 'center',
     marginBottom: spacing.sm,
   },
-  payeeName: {
-    ...typography.title,
-    fontSize: 15,
+  badgeRow: {
+    flexDirection: 'row',
+    gap: spacing.xs,
   },
-  payeeVpa: {
-    ...typography.captionMedium,
-    color: colors.textMuted,
-    fontFamily: 'monospace',
-    marginTop: 2,
-  },
-  verifiedBadge: {
+  headlinePill: {
+    backgroundColor: 'rgba(0, 245, 160, 0.15)',
     paddingHorizontal: spacing.sm,
-    paddingVertical: 2,
-    borderRadius: radii.pill,
-    backgroundColor: 'rgba(43, 217, 160, 0.15)',
-    borderWidth: 1,
-    borderColor: colors.success,
+    paddingVertical: 3,
+    borderRadius: radii?.pill ?? 9999,
   },
-  verifiedText: {
-    ...typography.pillLabel,
-    color: colors.success,
+  headlinePillText: {
+    ...typography.caption,
+    fontSize: 10,
+    color: colors?.textPurpleLight ?? '#C4B5FD',
+    fontWeight: '800',
   },
-  totalRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'baseline',
+  zeroFeePill: {
+    backgroundColor: 'rgba(0, 217, 245, 0.15)',
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 3,
+    borderRadius: radii?.pill ?? 9999,
   },
-  totalLabel: {
+  zeroFeePillText: {
+    ...typography.caption,
+    fontSize: 10,
+    color: colors?.accentEnd ?? '#00D9F5',
+    fontWeight: '800',
+  },
+  standardLabel: {
     ...typography.captionMedium,
-    color: colors.textFaint,
+    color: colors?.textMuted ?? '#8E92A8',
     letterSpacing: 1,
+    fontSize: 10,
   },
-  totalValue: {
-    ...typography.headingMd,
-    fontSize: 22,
-    color: colors.textPrimary,
-  },
-  sectionHeader: {
-    ...typography.captionMedium,
-    color: colors.textFaint,
-    letterSpacing: 1.2,
-    marginTop: spacing.xs,
-  },
-  modeCard: {
-    padding: spacing.md + 2,
-  },
-  modeCardDisabled: {
-    opacity: 0.6,
-  },
-  modeCardHeader: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    justifyContent: 'space-between',
-  },
-  modeCardTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: spacing.md,
-    flex: 1,
-  },
-  radioOuter: {
+  radio: {
     width: 22,
     height: 22,
     borderRadius: 11,
     borderWidth: 2,
-    borderColor: colors.textMuted,
+    borderColor: colors?.glassBorder ?? 'rgba(255, 255, 255, 0.08)',
     alignItems: 'center',
     justifyContent: 'center',
-    marginTop: 2,
   },
-  radioOuterSelected: {
-    borderColor: colors.accentEnd,
+  radioSelected: {
+    borderColor: colors?.accentStart ?? '#00F5A0',
   },
-  radioInner: {
+  radioDisabled: {
+    borderColor: colors?.textFaint ?? '#5A5F73',
+  },
+  radioDot: {
     width: 10,
     height: 10,
     borderRadius: 5,
-    backgroundColor: colors.accentEnd,
+    backgroundColor: colors?.accentStart ?? '#00F5A0',
   },
-  titleBadgeRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
+  cardTitle: {
+    ...typography.headingSm,
+    color: colors?.textPrimary ?? '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 18,
+    marginBottom: spacing.xs,
   },
-  modeTitle: {
-    ...typography.title,
-    fontSize: 16,
-  },
-  textDisabled: {
-    color: colors.textMuted,
-  },
-  standardPill: {
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 2,
-    borderRadius: radii.sm,
-    backgroundColor: 'rgba(255, 255, 255, 0.08)',
-  },
-  standardPillText: {
-    ...typography.pillLabel,
-    color: colors.textMuted,
-  },
-  recommendedPill: {
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 2,
-    borderRadius: radii.sm,
-    backgroundColor: 'rgba(34, 211, 238, 0.15)',
-    borderWidth: 1,
-    borderColor: colors.accentEnd,
-  },
-  recommendedPillText: {
-    ...typography.pillLabel,
-    color: colors.accentEnd,
-  },
-  modeSubtitle: {
+  cardSubtitle: {
     ...typography.body,
+    color: colors?.textMuted ?? '#8E92A8',
     fontSize: 13,
-    marginTop: spacing.xs,
     lineHeight: 18,
   },
   previewContainer: {
-    marginTop: spacing.sm,
-    paddingHorizontal: spacing.sm + 2,
-    paddingVertical: spacing.xs,
-    borderRadius: radii.sm,
-    backgroundColor: 'rgba(124, 92, 255, 0.12)',
-    borderWidth: 1,
-    borderColor: 'rgba(124, 92, 255, 0.3)',
-    alignSelf: 'flex-start',
+    marginTop: spacing.md,
+    paddingTop: spacing.sm,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 255, 255, 0.06)',
+  },
+  previewLabel: {
+    ...typography.captionMedium,
+    fontSize: 10,
+    color: colors?.accentEnd ?? '#00D9F5',
+    letterSpacing: 1,
+    fontWeight: '700',
+    marginBottom: 2,
   },
   previewText: {
-    ...typography.captionMedium,
-    color: colors.accentEnd,
+    ...typography.caption,
+    color: colors?.textPrimary ?? '#FFFFFF',
+    fontWeight: '600',
     fontSize: 12,
   },
-  disabledReasonText: {
-    ...typography.captionMedium,
-    color: colors.textFaint,
-    marginTop: spacing.xs,
-    fontStyle: 'italic',
-  },
-  explainerChip: {
+  disabledReasonContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: spacing.sm,
+    gap: 6,
+    marginTop: spacing.sm,
+  },
+  disabledReasonText: {
+    ...typography.caption,
+    color: colors?.warning ?? '#FFB020',
+    fontSize: 12,
+  },
+  explainerWrapper: {
+    marginTop: spacing.lg,
+    alignItems: 'center',
+  },
+  explainerChip: {
     paddingHorizontal: spacing.md,
-    borderRadius: radii.pill,
-    backgroundColor: colors.glassFill,
+    paddingVertical: spacing.xs + 2,
+    borderRadius: radii?.pill ?? 9999,
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
     borderWidth: 1,
-    borderColor: colors.glassBorder,
-    alignSelf: 'flex-start',
-    gap: spacing.xs,
-    marginTop: spacing.xs,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
   },
-  explainerIcon: {
-    fontSize: 14,
+  explainerChipText: {
+    ...typography.caption,
+    color: colors?.accentEnd ?? '#00D9F5',
+    fontWeight: '600',
+    fontSize: 12,
   },
-  explainerText: {
-    ...typography.captionMedium,
-    color: colors.textMuted,
-  },
-  explainerChevron: {
-    fontSize: 10,
-    color: colors.textFaint,
-    marginLeft: spacing.xs,
-  },
-  explainerContent: {
+  explainerBody: {
+    marginTop: spacing.md,
     padding: spacing.md,
-    borderRadius: radii.row,
+    width: '100%',
   },
   explainerParagraph: {
     ...typography.body,
+    color: colors?.textMuted ?? '#8E92A8',
     fontSize: 13,
-    lineHeight: 18,
-    color: colors.textMuted,
+    lineHeight: 19,
   },
-  ctaContainer: {
-    paddingTop: spacing.sm,
+  footer: {
+    paddingVertical: spacing.md,
   },
 });

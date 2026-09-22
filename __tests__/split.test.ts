@@ -4,6 +4,7 @@ import {
   LEG_CAP_PAISE,
   MIN_LEG_PAISE,
   MAX_TOTAL_PAISE,
+  MAX_LEGS,
 } from '../src/domain/split';
 
 describe('Split Algorithm (Section 5)', () => {
@@ -65,13 +66,14 @@ describe('Split Algorithm (Section 5)', () => {
     expect(plan.totalPaise).toBe(3_998_000);
   });
 
-  test('41979.00 -> throws TOO_MANY_LEGS', () => {
-    expect(() => planSplit(4_197_900)).toThrow(SplitError);
-    try {
-      planSplit(4_197_900);
-    } catch (err: any) {
-      expect(err.code).toBe('TOO_MANY_LEGS');
-    }
+  test('90000.25 -> 46 legs (45 of 1999.00 + 1 of 45.25), correctly planned', () => {
+    const plan = planSplit(9_000_025);
+    expect(plan.count).toBe(46);
+    expect(plan.legs.length).toBe(46);
+    expect(plan.legs.slice(0, 45).every((l) => l === 199_900)).toBe(true);
+    expect(plan.legs[45]).toBe(4_525);
+    expect(plan.totalPaise).toBe(9_000_025);
+    expect(plan.legs.reduce((a, b) => a + b, 0)).toBe(9_000_025);
   });
 
   test('100001.00 -> throws TOO_LARGE', () => {
@@ -113,7 +115,7 @@ describe('Split Algorithm (Section 5)', () => {
 
         expect(sum).toBe(amount);
         expect(plan.totalPaise).toBe(amount);
-        expect(plan.legs.length).toBeLessThanOrEqual(20);
+        expect(plan.legs.length).toBeLessThanOrEqual(MAX_LEGS);
         for (const leg of plan.legs) {
           expect(leg).toBeLessThanOrEqual(LEG_CAP_PAISE);
           expect(leg).toBeGreaterThanOrEqual(MIN_LEG_PAISE);

@@ -9,7 +9,6 @@ import {
   View,
   ViewProps,
 } from 'react-native';
-import LinearGradient from 'react-native-linear-gradient';
 import { colors, radii, spacing, typography } from '../theme/tokens';
 
 interface AndroidProtectedViewProps extends ViewProps {
@@ -42,17 +41,18 @@ export const GradientButton: React.FC<GradientButtonProps> = ({
   const isCooldown = typeof cooldownSeconds === 'number' && cooldownSeconds > 0;
   const isDisabled = disabled || loading || isCooldown;
 
-  const displayLabel = isCooldown ? `Next payment in ${cooldownSeconds}` : label;
+  const displayLabel = isCooldown ? `Next payment in ${cooldownSeconds}s` : label;
 
   const renderContent = () => (
     <View style={styles.contentRow}>
       {loading ? (
-        <ActivityIndicator color="#07070B" size="small" />
+        <ActivityIndicator color="#FFFFFF" size="small" />
       ) : (
         <>
           <Text
             style={[
               styles.text,
+              isDisabled && styles.disabledText,
               variant === 'glass' && styles.glassText,
               variant === 'danger' && styles.dangerText,
             ]}
@@ -72,23 +72,16 @@ export const GradientButton: React.FC<GradientButtonProps> = ({
         style={[styles.wrapper, isDisabled && styles.disabledWrapper, style]}
       >
         <TouchableOpacity
-          activeOpacity={0.88}
+          activeOpacity={0.85}
           onPress={onPress}
           disabled={isDisabled}
-          style={styles.touchable}
+          style={[
+            styles.touchable,
+            styles.primaryButton,
+            isDisabled && styles.primaryButtonDisabled,
+          ]}
         >
-          <LinearGradient
-            colors={
-              isDisabled
-                ? ['#3B3D4D', '#2B2D38']
-                : (colors.accentGradient as unknown as string[])
-            }
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
-            style={styles.gradient}
-          >
-            {renderContent()}
-          </LinearGradient>
+          {renderContent()}
         </TouchableOpacity>
       </ProtectedView>
     );
@@ -124,12 +117,19 @@ const styles = StyleSheet.create({
     borderRadius: radii.button,
     overflow: 'hidden',
   },
-  gradient: {
+  primaryButton: {
+    backgroundColor: colors.primaryButton ?? '#6338F2',
+    borderWidth: 1,
+    borderColor: colors.primaryButtonBorder ?? '#7C5CFF',
     paddingVertical: spacing.md + 2,
     paddingHorizontal: spacing.xl,
     alignItems: 'center',
     justifyContent: 'center',
     minHeight: 52,
+  },
+  primaryButtonDisabled: {
+    backgroundColor: colors.primaryButtonDisabled ?? '#1C1635',
+    borderColor: colors.primaryButtonDisabledBorder ?? '#2E2452',
   },
   glassButton: {
     backgroundColor: colors.glassFill,
@@ -152,7 +152,7 @@ const styles = StyleSheet.create({
     minHeight: 52,
   },
   disabledWrapper: {
-    opacity: 0.55,
+    opacity: 0.65,
   },
   contentRow: {
     flexDirection: 'row',
@@ -161,10 +161,13 @@ const styles = StyleSheet.create({
   },
   text: {
     ...typography.bodyMedium,
-    color: '#07070B', // Dark high-contrast text on bright neon gradient
-    fontWeight: '700',
+    color: '#FFFFFF',
+    fontWeight: '600',
     fontSize: 16,
-    letterSpacing: 0.2,
+    letterSpacing: 0.3,
+  },
+  disabledText: {
+    color: colors.primaryButtonTextDisabled ?? '#5E5380',
   },
   glassText: {
     color: colors.textPrimary,

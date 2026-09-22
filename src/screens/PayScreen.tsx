@@ -4,12 +4,12 @@ import {
   Text,
   StyleSheet,
   TouchableOpacity,
-  SafeAreaView,
   ScrollView,
   Modal,
-  Alert,
   BackHandler,
+  Image,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import ReactNativeHapticFeedback from 'react-native-haptic-feedback';
 
@@ -25,81 +25,262 @@ import {
 import { buildUpiUri, maskVpa } from '../domain/upi';
 import {
   getUpiIntent,
-  isMockEnabled,
-  setMockEnabled,
-  mockUpiIntent,
 } from '../native/upiIntent';
 import { colors, radii, spacing, typography } from '../theme/tokens';
 import { GlassCard } from '../components/GlassCard';
 import { GradientButton } from '../components/GradientButton';
 import { ProgressBar } from '../components/ProgressBar';
+import { BackButton } from '../components/BackButton';
 import { formatIndianCurrency } from '../components/AmountText';
+import { CustomModal, CustomModalButton } from '../components/CustomModal';
+import { AppIcon } from '../components/AppIcon';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Pay'>;
 
-export const PayScreen: React.FC<Props> = ({ navigation }) => {
-  const session = useSessionStore();
-  const {
-    startLeg,
-    completeLeg,
-    failLeg,
-    markLegUnknown,
-    resolveUnknownLeg,
-    setLastUsedPackage,
-    setInFlight,
-  } = useSessionStore();
+type ThemedDialogState = {
+  visible: boolean;
+  icon?: string;
+  iconType?: 'danger' | 'warning' | 'info' | 'success';
+  title: string;
+  message?: string;
+  primaryButton?: CustomModalButton;
+  secondaryButton?: CustomModalButton;
+};
 
-  const paidPaise = useMemo(() => selectPaidPaise(session), [session]);
-  const remainingPaise = useMemo(() => selectRemainingPaise(session), [session]);
-  const doneCount = useMemo(() => selectDoneCount(session), [session]);
-  const totalCount = useMemo(() => selectTotalCount(session), [session]);
-  const nextPendingLeg = useMemo(() => selectNextPendingLeg(session), [session]);
+type LegRowItemProps = {
+  leg: Leg;
+  index: number;
+  isNext: boolean;
+  onRetry: () => void;
+  onResolveUnknown: (legIndex: number, didSucceed: boolean) => void;
+};
+
+const LegRowItem = React.memo<LegRowItemProps>(({
+  leg,
+  index,
+  isNext,
+  onRetry,
+  onResolveUnknown,
+}) => {
+  const legAmount = formatIndianCurrency(leg?.amountPaise ?? 0);
+  return (
+    <GlassCard
+      style={[
+        styles.legRow,
+        isNext && styles.activeLegRow,
+        leg?.status === 'success' && styles.successLegRow,
+        leg?.status === 'failed' && styles.failedLegRow,
+      ]}
+    >
+      <View style={styles.legMainContent}>
+        <View style={styles.legLeft}>
+          <View style={styles.legIndexPill}>
+            <Text style={styles.legIndexText}>#{index + 1}</Text>
+          </View>
+          <View>
+            <Text style={styles.legAmount}>
+              ₹{legAmount.rupeePart}.{legAmount.decimalPart}
+            </Text>
+            {leg?.status === 'success' && leg?.txnId ? (
+              <Text style={styles.legRefText} numberOfLines={1}>
+                Ref: {leg.txnId} {leg.approvalRef ? `• Appr: ${leg.approvalRef}` : ''}
+              </Text>
+            ) : (
+              <Text style={styles.legStatusLabel}>
+                {leg?.status === 'pending'
+                  ? 'Pending'
+                  : leg?.status === 'in_progress'
+                  ? 'Opening UPI App...'
+                  : leg?.status === 'success'
+                  ? 'Paid'
+                  : leg?.status === 'failed'
+                  ? 'Failed'
+                  : 'Verification Needed'}
+              </Text>
+            )}
+          </View>
+        </View>
+
+        <View style={styles.legRight}>
+          {leg?.status === 'pending' && <View style={styles.pendingDot} />}
+          {leg?.status === 'in_progress' && <View style={styles.inProgressDot} />}
+          {leg?.status === 'success' && <Text style={styles.statusSuccessIcon}>✓</Text>}
+          {leg?.status === 'failed' && (
+            <TouchableOpacity
+              activeOpacity={0.8}
+              onPress={onRetry}
+              style={styles.retryBadge}
+            >
+              <Text style={styles.retryBadgeText}>Retry ↺</Text>
+            </TouchableOpacity>
+          )}
+          {leg?.status === 'unknown' && <Text style={styles.statusUnknownIcon}>?</Text>}
+        </View>
+      </View>
+
+      {/* Unknown Resolution Prompt */}
+      {leg?.status === 'unknown' && (
+        <View style={styles.unknownPromptBox}>
+          <Text style={styles.unknownPromptText}>
+            Did this payment go through in your UPI app?
+          </Text>
+          <View style={styles.unknownButtonsRow}>
+            <TouchableOpacity
+              activeOpacity={0.8}
+              onPress={() => onResolveUnknown(leg.index, true)}
+              style={[styles.unknownBtn, styles.unknownYesBtn]}
+            >
+              <Text style={styles.unknownYesText}>Yes, Succeeded</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              activeOpacity={0.8}
+              onPress={() => onResolveUnknown(leg.index, false)}
+              style={[styles.unknownBtn, styles.unknownNoBtn]}
+            >
+              <Text style={styles.unknownNoText}>No, Failed</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
+    </GlassCard>
+  );
+});
+export const PayScreen: React.FC<Props> = ({ navigation }) => {
+  const insets = useSafeAreaInsets();
+
+  // Atomic Zustand state selectors (re-renders only when the respective field changes)
+  const paidPaise = useSessionStore(selectPaidPaise);
+  const remainingPaise = useSessionStore(selectRemainingPaise);
+  const doneCount = useSessionStore(selectDoneCount);
+  const totalCount = useSessionStore(selectTotalCount);
+  const nextPendingLeg = useSessionStore(selectNextPendingLeg);
+  const legs = useSessionStore((state) => state.legs);
+  const totalPaise = useSessionStore((state) => state.totalPaise);
+  const payeeVpa = useSessionStore((state) => state.payeeVpa);
+  const payeeName = useSessionStore((state) => state.payeeName);
+  const merchantCode = useSessionStore((state) => state.merchantCode);
+  const transactionNote = useSessionStore((state) => state.transactionNote);
+  const signature = useSessionStore((state) => state.signature);
+  const mode = useSessionStore((state) => state.mode);
+  const inFlight = useSessionStore((state) => state.inFlight);
+  const cooldownUntil = useSessionStore((state) => state.cooldownUntil);
+  const lastUsedPackage = useSessionStore((state) => state.lastUsedPackage);
+
+  const startLeg = useSessionStore((state) => state.startLeg);
+  const completeLeg = useSessionStore((state) => state.completeLeg);
+  const failLeg = useSessionStore((state) => state.failLeg);
+  const markLegUnknown = useSessionStore((state) => state.markLegUnknown);
+  const resolveUnknownLeg = useSessionStore((state) => state.resolveUnknownLeg);
+  const setLastUsedPackage = useSessionStore((state) => state.setLastUsedPackage);
 
   const [appsSheetVisible, setAppsSheetVisible] = useState(false);
   const [installedApps, setInstalledApps] = useState<UpiAppInfo[]>([]);
   const [loadingApps, setLoadingApps] = useState(false);
   const [cooldownRemaining, setCooldownRemaining] = useState<number | null>(null);
-  const [mockDevMode, setMockDevMode] = useState<boolean>(isMockEnabled());
 
-  // Hardware Back Button interception per Section 9.38
+  const [dialog, setDialog] = useState<ThemedDialogState>({ visible: false, title: '' });
+  const showThemedDialog = useCallback((config: Omit<ThemedDialogState, 'visible'>) => {
+    setDialog({ ...config, visible: true });
+  }, []);
+  const closeDialog = useCallback(() => setDialog((prev) => ({ ...prev, visible: false })), []);
+
+  // Abandon confirm dialog per Section 4.5 & 9.32
+  const handleAbandon = useCallback(() => {
+    if (doneCount === 0) {
+      showThemedDialog({
+        iconType: 'warning',
+        title: 'Cancel Payment?',
+        message: 'No payments have been made. Do you want to cancel this payment session?',
+        primaryButton: {
+          text: 'Cancel Session',
+          destructive: true,
+          onPress: () => {
+            closeDialog();
+            try {
+              useSessionStore.getState()?.resetSession?.();
+              navigation?.reset?.({ index: 0, routes: [{ name: 'Scanner' }] });
+            } catch (err: unknown) {
+              console.warn('[PayScreen] Reset navigation error:', err);
+            }
+          },
+        },
+        secondaryButton: {
+          text: 'Resume',
+          onPress: closeDialog,
+        },
+      });
+      return;
+    }
+
+    showThemedDialog({
+      iconType: 'danger',
+      title: 'Abandon Payment Session?',
+      message:
+        'Already completed payments are final and cannot be reversed by NoFeePe. If you abandon now, your partial payment receipt will be generated for completed payments.',
+      primaryButton: {
+        text: 'Abandon & View Receipt',
+        destructive: true,
+        onPress: () => {
+          closeDialog();
+          try {
+            navigation?.navigate?.('Success', { partial: true });
+          } catch (err: unknown) {
+            console.warn('[PayScreen] Navigation to Partial Success error:', err);
+          }
+        },
+      },
+      secondaryButton: {
+        text: 'Resume Payment',
+        onPress: closeDialog,
+      },
+    });
+  }, [closeDialog, doneCount, navigation, showThemedDialog]);
+
+  // Intercept hardware back button per Section 9.38
   useEffect(() => {
     const onBackPress = () => {
-      if (doneCount > 0) {
-        handleAbandon();
-        return true;
+      try {
+        if (doneCount > 0) {
+          handleAbandon();
+          return true;
+        }
+      } catch (err: unknown) {
+        console.warn('[PayScreen] onBackPress error:', err);
       }
       return false;
     };
 
     const backHandler = BackHandler.addEventListener('hardwareBackPress', onBackPress);
     return () => backHandler.remove();
-  }, [doneCount]);
+  }, [doneCount, handleAbandon]);
 
-  // 3-second Cooldown countdown timer per Section 4.5
+  // 3-second cooldown countdown timer per Section 4.5 (runs only when cooldown is active)
   useEffect(() => {
-    const interval = setInterval(() => {
-      if (session.cooldownUntil) {
-        const remaining = Math.ceil((session.cooldownUntil - Date.now()) / 1000);
-        if (remaining > 0) {
-          setCooldownRemaining(remaining);
-        } else {
-          setCooldownRemaining(null);
-        }
+    if (!cooldownUntil) {
+      setCooldownRemaining(null);
+      return;
+    }
+    const updateCooldown = () => {
+      const remaining = Math.ceil((cooldownUntil - Date.now()) / 1000);
+      if (remaining > 0) {
+        setCooldownRemaining(remaining);
       } else {
         setCooldownRemaining(null);
       }
-    }, 200);
-
+    };
+    updateCooldown();
+    const interval = setInterval(updateCooldown, 250);
     return () => clearInterval(interval);
-  }, [session.cooldownUntil]);
+  }, [cooldownUntil]);
 
-  // Load available UPI apps
+  // Load available UPI apps via Android PackageManager
   const loadApps = useCallback(async () => {
     setLoadingApps(true);
     try {
       const apps = await getUpiIntent().listUpiApps();
-      setInstalledApps(apps);
-    } catch {
+      setInstalledApps(apps ?? []);
+    } catch (err: unknown) {
+      console.warn('[PayScreen] Failed to list UPI apps:', err);
       setInstalledApps([]);
     } finally {
       setLoadingApps(false);
@@ -113,17 +294,19 @@ export const PayScreen: React.FC<Props> = ({ navigation }) => {
   const triggerHaptic = (type: 'impactMedium' | 'notificationSuccess' | 'impactHeavy') => {
     try {
       ReactNativeHapticFeedback.trigger(type, { enableVibrateFallback: true });
-    } catch {}
+    } catch (err: unknown) {
+      console.debug?.('[PayScreen] Haptic error:', err);
+    }
   };
 
   // Open App Picker Sheet
-  const handlePressPay = () => {
-    if (!nextPendingLeg || session.inFlight || (cooldownRemaining && cooldownRemaining > 0)) {
+  const handlePressPay = useCallback(() => {
+    if (!nextPendingLeg || inFlight || (cooldownRemaining && cooldownRemaining > 0)) {
       return;
     }
     loadApps();
     setAppsSheetVisible(true);
-  };
+  }, [nextPendingLeg, inFlight, cooldownRemaining, loadApps]);
 
   // Execute payment leg with chosen app
   const executePaymentLeg = async (selectedApp: UpiAppInfo) => {
@@ -132,32 +315,43 @@ export const PayScreen: React.FC<Props> = ({ navigation }) => {
 
     const legIndex = nextPendingLeg.index;
     setLastUsedPackage(selectedApp.packageName);
-    startLeg(legIndex);
+    startLeg(legIndex, selectedApp.packageName, selectedApp.label);
 
     try {
-      // Build URI per Section 6.2 with fresh unique tr and immutability check
+      // Build URI per Section 6.2 with fresh unique tr and session immutability check
       const paymentUri = buildUpiUri({
-        payeeVpa: session.payeeVpa,
-        originalVpa: session.payeeVpa,
-        payeeName: session.payeeName,
+        payeeVpa: payeeVpa ?? '',
+        originalVpa: payeeVpa ?? '',
+        payeeName: payeeName ?? null,
         amountPaise: nextPendingLeg.amountPaise,
-        transactionNote: session.transactionNote || `Leg ${legIndex + 1} of ${totalCount}`,
-        merchantCode: session.merchantCode,
-        signature: session.mode === 'direct' ? session.signature : null,
+        transactionNote: transactionNote || `Leg ${legIndex + 1} of ${totalCount}`,
+        merchantCode: merchantCode ?? null,
+        signature: mode === 'direct' ? (signature ?? null) : null,
       });
 
       const result = await getUpiIntent().pay(paymentUri, selectedApp.packageName);
 
       // Section 9: Handling payment results
-      switch (result.status) {
+      switch (result?.status) {
         case 'SUCCESS': {
-          completeLeg(legIndex, result.txnId, result.approvalRef, result.raw);
+          completeLeg(
+            legIndex,
+            result.txnId,
+            result.approvalRef,
+            result.raw,
+            selectedApp.packageName,
+            selectedApp.label
+          );
           const isFinalLeg = doneCount + 1 >= totalCount;
           triggerHaptic(isFinalLeg ? 'impactHeavy' : 'notificationSuccess');
 
           if (isFinalLeg) {
             setTimeout(() => {
-              navigation.navigate('Success', { partial: false });
+              try {
+                navigation?.navigate?.('Success', { partial: false });
+              } catch (navErr: unknown) {
+                console.warn('[PayScreen] Navigation to Success error:', navErr);
+              }
             }, 600);
           }
           break;
@@ -165,840 +359,750 @@ export const PayScreen: React.FC<Props> = ({ navigation }) => {
 
         case 'FAILURE': {
           failLeg(legIndex);
-          Alert.alert(
-            'Payment Failed',
-            'Transaction failed or bank limit reached. You can tap Retry on this row.',
-            [{ text: 'OK' }]
-          );
+          showThemedDialog({
+            iconType: 'danger',
+            title: 'Payment Failed',
+            message: 'Transaction failed or bank limit reached. You can tap Retry on this row.',
+            primaryButton: { text: 'Got It', onPress: closeDialog },
+          });
           break;
         }
 
         case 'PENDING':
         case 'UNKNOWN': {
           // Dangerous case per Section 9.26: Never auto-advance or mark success
-          markLegUnknown(legIndex, result.raw);
+          markLegUnknown(legIndex, result?.raw);
           break;
         }
 
         case 'CANCELLED': {
-          // User backed out. Leg stays pending, no penalty per Section 9.27
-          failLeg(legIndex); // or return to pending
+          // User backed out: leg stays pending with no penalty per Section 9.27
+          failLeg(legIndex);
           useSessionStore.setState((s) => {
-            const legs = [...s.legs];
-            legs[legIndex].status = 'pending';
-            return { legs, inFlight: false };
+            const updatedLegs = [...(s?.legs ?? [])];
+            if (updatedLegs[legIndex]) {
+              updatedLegs[legIndex].status = 'pending';
+            }
+            return { legs: updatedLegs, inFlight: false };
           });
           break;
         }
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       failLeg(legIndex);
-      Alert.alert('Payment Error', err.message || 'Unable to launch UPI app.');
+      const errMsg = err instanceof Error ? err.message : 'Unable to launch UPI app.';
+      showThemedDialog({
+        iconType: 'danger',
+        title: 'Payment Error',
+        message: errMsg,
+        primaryButton: { text: 'Dismiss', onPress: closeDialog },
+      });
     }
   };
 
-  // Abandon confirm dialog per Section 4.5 & 9.32
-  const handleAbandon = () => {
-    Alert.alert(
-      'Abandon Payment Session?',
-      'Already completed payments are final and cannot be reversed by noFeePe. If you abandon now, your partial payment receipt will be generated.',
-      [
-        { text: 'Resume Payment', style: 'cancel' },
-        {
-          text: 'Abandon & View Receipt',
-          style: 'destructive',
-          onPress: () => {
-            navigation.navigate('Success', { partial: true });
-          },
-        },
-      ]
-    );
-  };
-
   const handlePause = () => {
-    Alert.alert(
-      'Session Paused',
-      'You can resume anytime while the app is active. Please complete remaining payments to avoid pending merchant orders.',
-      [{ text: 'Resume' }]
-    );
+    showThemedDialog({
+      iconType: 'info',
+      title: 'Session Paused',
+      message:
+        'You can resume anytime while the app is active. Please complete remaining payments to avoid pending merchant orders.',
+      primaryButton: { text: 'Resume', onPress: closeDialog },
+    });
   };
 
-  const paidFormatted = formatIndianCurrency(paidPaise);
-  const totalFormatted = formatIndianCurrency(session.totalPaise);
-  const remainingFormatted = formatIndianCurrency(remainingPaise);
-  const progressPercent = session.totalPaise > 0 ? paidPaise / session.totalPaise : 0;
+  const handleResolveUnknown = (legIndex: number, didSucceed: boolean) => {
+    try {
+      resolveUnknownLeg(legIndex, didSucceed);
+      if (didSucceed) {
+        const isFinal = doneCount + 1 >= totalCount;
+        triggerHaptic(isFinal ? 'impactHeavy' : 'notificationSuccess');
+        if (isFinal) {
+          setTimeout(() => {
+            navigation?.navigate?.('Success', { partial: false });
+          }, 600);
+        }
+      }
+    } catch (err: unknown) {
+      console.warn('[PayScreen] handleResolveUnknown error:', err);
+    }
+  };
 
-  // Sorted apps: pinned last used app at top per Section 4.5
+  // Sort available UPI apps alphabetically (A–Z) by display label, pinned last used app at top
   const sortedApps = useMemo(() => {
-    if (!session.lastUsedPackage) return installedApps;
-    return [...installedApps].sort((a, b) => {
-      if (a.packageName === session.lastUsedPackage) return -1;
-      if (b.packageName === session.lastUsedPackage) return 1;
-      return 0;
-    });
-  }, [installedApps, session.lastUsedPackage]);
+    try {
+      return [...(installedApps ?? [])].sort((a, b) => {
+        if (a?.packageName === lastUsedPackage) return -1;
+        if (b?.packageName === lastUsedPackage) return 1;
+        const labelA = a?.label ?? '';
+        const labelB = b?.label ?? '';
+        return labelA.localeCompare(labelB, undefined, { sensitivity: 'base' });
+      });
+    } catch {
+      return installedApps ?? [];
+    }
+  }, [installedApps, lastUsedPackage]);
+
+  const paidFormatted = useMemo(() => formatIndianCurrency(paidPaise), [paidPaise]);
+  const totalFormatted = useMemo(() => formatIndianCurrency(totalPaise ?? 0), [totalPaise]);
+  const remainingFormatted = useMemo(() => formatIndianCurrency(remainingPaise), [remainingPaise]);
+  const progressFraction = (totalPaise ?? 0) > 0 ? paidPaise / totalPaise : 0;
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <View style={styles.container}>
-        {/* Top Header */}
-        <View style={styles.header}>
-          <TouchableOpacity
-            activeOpacity={0.7}
-            onPress={doneCount > 0 ? handleAbandon : () => navigation.goBack()}
-            style={styles.backButton}
-          >
-            <Text style={styles.backIcon}>←</Text>
-          </TouchableOpacity>
-          <View style={styles.headerTitleContainer}>
-            <Text style={styles.headerTitle}>
-              {session.mode === 'split' ? 'Split & Pay Tracker' : 'Direct Payment'}
+    <View
+      style={[
+        styles.container,
+        {
+          paddingTop: insets.top + spacing.sm,
+          paddingBottom: Math.max(insets.bottom, 16) + spacing.xs,
+        },
+      ]}
+    >
+      {/* Header */}
+      <View style={styles.header}>
+        <BackButton onPress={handleAbandon} />
+        <Text style={styles.headerTitle}>
+          {mode === 'split' ? 'Split & Pay Tracker' : 'Direct Payment'}
+        </Text>
+        <View style={styles.backPlaceholder} />
+      </View>
+
+      <ScrollView contentContainerStyle={styles.scrollContent} bounces={false}>
+        {/* Payee Glass Card */}
+        <GlassCard style={styles.payeeCard}>
+          <View style={styles.payeeRow}>
+            <View style={styles.avatar}>
+              <Text style={styles.avatarText}>
+                {payeeName ? payeeName.charAt(0).toUpperCase() : '₹'}
+              </Text>
+            </View>
+            <View style={styles.payeeInfo}>
+              <Text style={styles.payeeName} numberOfLines={1}>
+                {payeeName || 'UPI Merchant'}
+              </Text>
+              <Text style={styles.payeeVpa}>{maskVpa(payeeVpa ?? '')}</Text>
+            </View>
+            <View style={styles.modeBadge}>
+              <Text style={styles.modeBadgeText}>
+                {mode === 'split' ? 'SPLIT' : 'DIRECT'}
+              </Text>
+            </View>
+          </View>
+        </GlassCard>
+
+        {/* Progress Block per Section 4.5 */}
+        <GlassCard elevated style={styles.progressCard}>
+          <View style={styles.progressTextRow}>
+            <Text style={styles.progressPaidText}>
+              ₹{paidFormatted.rupeePart}.{paidFormatted.decimalPart} of ₹
+              {totalFormatted.rupeePart}.{totalFormatted.decimalPart} paid
             </Text>
-            <Text style={styles.headerSubtitle}>
-              {doneCount} of {totalCount} payments done
+            <Text style={styles.progressCountText}>
+              {doneCount} of {totalCount} done
             </Text>
           </View>
 
-          {/* Dev Mock Toggle Button */}
-          {__DEV__ && (
-            <TouchableOpacity
-              activeOpacity={0.7}
-              onPress={() => {
-                const next = !mockDevMode;
-                setMockDevMode(next);
-                setMockEnabled(next);
-                Alert.alert(
-                  'Mock Mode Toggled',
-                  next
-                    ? 'Mock UPI enabled: simulated payments will succeed without real money.'
-                    : 'Real UPI enabled: will invoke installed UPI apps.'
-                );
-              }}
-              style={[styles.mockToggle, mockDevMode && styles.mockToggleActive]}
-            >
-              <Text style={styles.mockToggleText}>{mockDevMode ? 'MOCK' : 'REAL'}</Text>
-            </TouchableOpacity>
-          )}
+          <View style={styles.progressBarWrapper}>
+            <ProgressBar progress={progressFraction} />
+          </View>
+
+          <View style={styles.progressBottomRow}>
+            <Text style={styles.remainingText}>
+              ₹{remainingFormatted.rupeePart}.{remainingFormatted.decimalPart} remaining
+            </Text>
+            {mode === 'split' && (
+              <Text style={styles.subCapTag}>Capped at ₹1,999/leg</Text>
+            )}
+          </View>
+        </GlassCard>
+
+        {/* Leg Installment List */}
+        <View style={styles.legsListSection}>
+          <Text style={styles.sectionHeader}>
+            {mode === 'split' ? 'PAYMENT INSTALMENTS' : 'PAYMENT DETAILS'}
+          </Text>
+
+          {(legs ?? []).map((leg: Leg, index: number) => (
+            <LegRowItem
+              key={leg?.index ?? index}
+              leg={leg}
+              index={index}
+              isNext={nextPendingLeg?.index === leg?.index}
+              onRetry={handlePressPay}
+              onResolveUnknown={handleResolveUnknown}
+            />
+          ))}
         </View>
+      </ScrollView>
 
-        <ScrollView contentContainerStyle={styles.scrollContent}>
-          {/* Payee Card with Masked VPA */}
-          <GlassCard style={styles.payeeCard}>
-            <View style={styles.payeeRow}>
-              <View style={styles.merchantAvatar}>
-                <Text style={styles.merchantAvatarText}>🏬</Text>
-              </View>
-              <View style={styles.payeeInfo}>
-                <Text numberOfLines={1} style={styles.payeeName}>
-                  {session.payeeName || 'Merchant'}
-                </Text>
-                <Text style={styles.payeeVpa}>{maskVpa(session.payeeVpa)}</Text>
-              </View>
-              <View style={styles.badgeActive}>
-                <Text style={styles.badgeActiveText}>Active</Text>
-              </View>
-            </View>
-          </GlassCard>
+      {/* Primary Action Button & Secondary Controls */}
+      <View style={styles.footer}>
+        {nextPendingLeg ? (
+          <GradientButton
+            label={`Pay ₹${(nextPendingLeg.amountPaise / 100).toFixed(2)}`}
+            onPress={handlePressPay}
+            disabled={inFlight || (cooldownRemaining !== null && cooldownRemaining > 0)}
+            cooldownSeconds={cooldownRemaining}
+            variant="primary"
+          />
+        ) : (
+          <GradientButton
+            label="View Receipt"
+            onPress={() => {
+              try {
+                navigation?.navigate?.('Success', { partial: false });
+              } catch (err: unknown) {
+                console.warn('[PayScreen] Navigate to Success error:', err);
+              }
+            }}
+            variant="primary"
+          />
+        )}
 
-          {/* Progress Block per Section 4.5 */}
-          <GlassCard elevated style={styles.progressCard}>
-            <View style={styles.progressHeaderRow}>
-              <Text style={styles.progressMainText}>
-                ₹{paidFormatted.rupeePart}.{paidFormatted.decimalPart}
-                <Text style={styles.progressSubText}> of ₹{totalFormatted.rupeePart}.{totalFormatted.decimalPart} paid</Text>
-              </Text>
-              <Text style={styles.percentText}>
-                {Math.round(progressPercent * 100)}%
-              </Text>
-            </View>
-
-            {/* Reanimated Animated Progress Bar */}
-            <ProgressBar
-              progress={progressPercent}
-              segmented={session.mode === 'split'}
-              totalSegments={totalCount}
-              completedSegments={doneCount}
-              style={styles.progressBar}
-            />
-
-            <View style={styles.progressFooterRow}>
-              <Text style={styles.remainingText}>
-                ₹{remainingFormatted.rupeePart}.{remainingFormatted.decimalPart} remaining
-              </Text>
-              <Text style={styles.countText}>
-                {doneCount} of {totalCount} payments done
-              </Text>
-            </View>
-          </GlassCard>
-
-          {/* Leg List per Section 4.5 */}
-          <View style={styles.legListContainer}>
-            <Text style={styles.legListHeader}>SEQUENTIAL INSTALMENTS</Text>
-
-            {session.legs.map((leg) => {
-              const legFormatted = formatIndianCurrency(leg.amountPaise);
-              const isPending = leg.status === 'pending';
-              const isInProgress = leg.status === 'in_progress';
-              const isSuccess = leg.status === 'success';
-              const isFailed = leg.status === 'failed';
-              const isUnknown = leg.status === 'unknown';
-
-              return (
-                <GlassCard
-                  key={leg.index}
-                  style={[
-                    styles.legRow,
-                    isSuccess && styles.legRowSuccess,
-                    isFailed && styles.legRowFailed,
-                    isUnknown && styles.legRowUnknown,
-                  ]}
-                >
-                  <View style={styles.legRowLeft}>
-                    {/* Status Icons per Section 4.5 */}
-                    <View style={styles.statusIndicator}>
-                      {isPending && <View style={styles.dotPending} />}
-                      {isInProgress && <View style={styles.dotInProgress} />}
-                      {isSuccess && <Text style={styles.iconSuccess}>✓</Text>}
-                      {isFailed && <Text style={styles.iconFailed}>✕</Text>}
-                      {isUnknown && <Text style={styles.iconUnknown}>?</Text>}
-                    </View>
-
-                    <View style={styles.legDetails}>
-                      <View style={styles.legTitleRow}>
-                        <Text style={styles.legTitle}>Payment #{leg.index + 1}</Text>
-                        {isSuccess && (
-                          <View style={styles.pillSuccess}>
-                            <Text style={styles.pillSuccessText}>Paid</Text>
-                          </View>
-                        )}
-                        {isFailed && (
-                          <View style={styles.pillFailed}>
-                            <Text style={styles.pillFailedText}>Failed</Text>
-                          </View>
-                        )}
-                        {isUnknown && (
-                          <View style={styles.pillUnknown}>
-                            <Text style={styles.pillUnknownText}>Awaiting Check</Text>
-                          </View>
-                        )}
-                      </View>
-
-                      {/* Small monospace UPI txnId & approval reference per Section 4.5 */}
-                      {isSuccess && leg.txnId && (
-                        <Text style={styles.refText}>
-                          Ref: {leg.txnId} {leg.approvalRef ? `• ${leg.approvalRef}` : ''}
-                        </Text>
-                      )}
-
-                      {/* Unknown / Submitted affordance: Yes / No buttons per Section 4.5 & 9.26 */}
-                      {isUnknown && (
-                        <View style={styles.unknownBox}>
-                          <Text style={styles.unknownPrompt}>
-                            Did this payment go through in your bank app?
-                          </Text>
-                          <View style={styles.unknownActions}>
-                            <TouchableOpacity
-                              activeOpacity={0.7}
-                              onPress={() => resolveUnknownLeg(leg.index, true)}
-                              style={styles.unknownBtnYes}
-                            >
-                              <Text style={styles.unknownBtnText}>Yes, paid</Text>
-                            </TouchableOpacity>
-                            <TouchableOpacity
-                              activeOpacity={0.7}
-                              onPress={() => resolveUnknownLeg(leg.index, false)}
-                              style={styles.unknownBtnNo}
-                            >
-                              <Text style={styles.unknownBtnText}>No, failed</Text>
-                            </TouchableOpacity>
-                          </View>
-                        </View>
-                      )}
-                    </View>
-                  </View>
-
-                  <View style={styles.legRowRight}>
-                    <Text style={styles.legAmount}>
-                      ₹{legFormatted.rupeePart}.{legFormatted.decimalPart}
-                    </Text>
-                    {isFailed && (
-                      <TouchableOpacity
-                        activeOpacity={0.7}
-                        onPress={handlePressPay}
-                        style={styles.retryButton}
-                      >
-                        <Text style={styles.retryText}>Retry</Text>
-                      </TouchableOpacity>
-                    )}
-                  </View>
-                </GlassCard>
-              );
-            })}
-          </View>
-        </ScrollView>
-
-        {/* Primary Action & Secondary Actions Footer */}
-        <View style={styles.footer}>
-          {nextPendingLeg ? (
-            <GradientButton
-              label={`Pay ₹${(nextPendingLeg.amountPaise / 100).toFixed(2)}`}
-              onPress={handlePressPay}
-              loading={session.inFlight}
-              cooldownSeconds={cooldownRemaining}
-            />
-          ) : (
-            <GradientButton
-              label="View Final Receipt"
-              onPress={() => navigation.navigate('Success', { partial: doneCount < totalCount })}
-            />
-          )}
-
-          {/* Secondary Actions: Pause and Abandon per Section 4.5 */}
-          <View style={styles.secondaryActionsRow}>
-            <TouchableOpacity
-              activeOpacity={0.7}
-              onPress={handlePause}
-              style={styles.secondaryBtn}
-            >
-              <Text style={styles.secondaryBtnText}>Pause</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              activeOpacity={0.7}
-              onPress={handleAbandon}
-              style={styles.secondaryBtn}
-            >
-              <Text style={[styles.secondaryBtnText, { color: colors.danger }]}>
-                Abandon
-              </Text>
-            </TouchableOpacity>
-          </View>
+        <View style={styles.secondaryActions}>
+          <TouchableOpacity activeOpacity={0.7} onPress={handlePause} style={styles.secondaryButton}>
+            <Text style={styles.secondaryButtonText}>Pause</Text>
+          </TouchableOpacity>
+          <TouchableOpacity activeOpacity={0.7} onPress={handleAbandon} style={styles.secondaryButton}>
+            <Text style={[styles.secondaryButtonText, styles.abandonText]}>Abandon</Text>
+          </TouchableOpacity>
         </View>
       </View>
 
-      {/* UPI App Selection Bottom Sheet per Section 4.5 & 7.2 */}
-      <Modal visible={appsSheetVisible} transparent animationType="slide">
+      {/* UPI App Selection Bottom Sheet */}
+      <Modal
+        visible={appsSheetVisible}
+        transparent={true}
+        animationType="slide"
+        onRequestClose={() => setAppsSheetVisible(false)}
+      >
         <View style={styles.sheetBackdrop}>
-          <TouchableOpacity
-            style={styles.sheetDismissArea}
-            activeOpacity={1}
-            onPress={() => setAppsSheetVisible(false)}
-          />
-          <GlassCard elevated style={styles.sheetContent}>
+          <View
+            style={[
+              styles.sheetCard,
+              { paddingBottom: Math.max(insets.bottom, 20) + spacing.md },
+            ]}
+          >
+            <View style={styles.sheetHandle} />
+
             <View style={styles.sheetHeader}>
-              <View style={styles.sheetHandle} />
-              <Text style={styles.sheetTitle}>Choose UPI App</Text>
-              <Text style={styles.sheetSubtitle}>
-                Authorizing leg for ₹{nextPendingLeg ? (nextPendingLeg.amountPaise / 100).toFixed(2) : '0.00'}
-              </Text>
+              <View>
+                <Text style={styles.sheetTitle}>Choose UPI App</Text>
+                <Text style={styles.sheetSubtitle}>
+                  {nextPendingLeg
+                    ? `Paying ₹${(nextPendingLeg.amountPaise / 100).toFixed(2)} for Leg ${
+                        nextPendingLeg.index + 1
+                      }`
+                    : 'Select app to proceed'}
+                </Text>
+              </View>
+              <TouchableOpacity
+                activeOpacity={0.7}
+                onPress={() => setAppsSheetVisible(false)}
+                style={styles.sheetCloseButton}
+              >
+                <Text style={styles.sheetCloseText}>✕</Text>
+              </TouchableOpacity>
             </View>
 
-            <ScrollView style={styles.sheetAppList}>
-              {sortedApps.length === 0 ? (
-                <View style={styles.emptyAppsContainer}>
-                  <Text style={styles.emptyAppsTitle}>No UPI app found on this device</Text>
-                  <Text style={styles.emptyAppsSub}>
-                    Install a supported UPI app (PhonePe, Google Pay, BHIM, etc.) to complete payment.
-                  </Text>
+            {loadingApps ? (
+              <View style={styles.sheetLoading}>
+                <Text style={styles.sheetLoadingText}>Detecting installed UPI apps...</Text>
+              </View>
+            ) : sortedApps.length === 0 ? (
+              <View style={styles.emptyAppsContainer}>
+                <View style={styles.emptyAppsIconWrapper}>
+                  <AppIcon name="warning" size={32} color="#F59E0B" />
                 </View>
-              ) : (
-                sortedApps.map((app) => {
-                  const isPinned = app.packageName === session.lastUsedPackage;
+                <Text style={styles.emptyAppsTitle}>No UPI Apps Found</Text>
+                <Text style={styles.emptyAppsSubtitle}>
+                  Please install a UPI app (Google Pay, PhonePe, Paytm, BHIM) to complete payments.
+                </Text>
+              </View>
+            ) : (
+              <ScrollView style={styles.appsList} bounces={false}>
+                {sortedApps.map((app) => {
+                  const isPinned = app?.packageName === lastUsedPackage;
                   return (
                     <TouchableOpacity
-                      key={app.packageName}
+                      key={app?.packageName}
                       activeOpacity={0.75}
                       onPress={() => executePaymentLeg(app)}
-                      style={[styles.appItem, isPinned && styles.appItemPinned]}
+                      style={[styles.appItem, isPinned && styles.pinnedAppItem]}
                     >
                       <View style={styles.appItemLeft}>
-                        <View
-                          style={[
-                            styles.appIconContainer,
-                            app.brandColor ? { backgroundColor: app.brandColor } : undefined,
-                          ]}
-                        >
-                          <Text style={styles.appInitial}>
-                            {app.label.charAt(0)}
-                          </Text>
-                        </View>
+                        {app?.iconBase64 ? (
+                          <Image
+                            source={{ uri: app.iconBase64 }}
+                            style={styles.installedAppIcon}
+                            resizeMode="contain"
+                          />
+                        ) : (
+                          <View
+                            style={[
+                              styles.appColorDot,
+                              { backgroundColor: (app?.brandColor || colors?.accentStart) ?? '#00F5A0' },
+                            ]}
+                          />
+                        )}
                         <View>
-                          <Text style={styles.appLabel}>{app.label}</Text>
-                          {isPinned ? (
-                            <Text style={styles.pinnedLabel}>Last used • Instant handoff</Text>
-                          ) : (
-                            <Text style={styles.appPkgMuted}>{app.packageName}</Text>
-                          )}
+                          <Text style={styles.appLabel}>{app?.label}</Text>
+                          {isPinned && <Text style={styles.pinnedLabel}>Last used</Text>}
                         </View>
                       </View>
-                      <Text style={styles.appArrow}>→</Text>
+                      <Text style={styles.appPayArrow}>→</Text>
                     </TouchableOpacity>
                   );
-                })
-              )}
-            </ScrollView>
-
-            <TouchableOpacity
-              activeOpacity={0.7}
-              onPress={() => setAppsSheetVisible(false)}
-              style={styles.sheetCancelBtn}
-            >
-              <Text style={styles.sheetCancelText}>Cancel</Text>
-            </TouchableOpacity>
-          </GlassCard>
+                })}
+              </ScrollView>
+            )}
+          </View>
         </View>
       </Modal>
-    </SafeAreaView>
+
+      {/* Themed Custom Modal */}
+      <CustomModal
+        visible={dialog.visible}
+        icon={dialog.icon}
+        iconType={dialog.iconType}
+        title={dialog.title}
+        message={dialog.message}
+        primaryButton={dialog.primaryButton}
+        secondaryButton={dialog.secondaryButton}
+        onDismiss={closeDialog}
+      />
+    </View>
   );
 };
 
 const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: colors.bgBase,
-  },
   container: {
     flex: 1,
-    justifyContent: 'space-between',
-    paddingBottom: spacing.lg,
+    backgroundColor: '#07070B',
+    paddingHorizontal: spacing.md,
   },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
-  },
-  backButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: colors.glassFill,
-    borderWidth: 1,
-    borderColor: colors.glassBorder,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  backIcon: {
-    color: colors.textPrimary,
-    fontSize: 20,
-    fontWeight: '700',
-  },
-  headerTitleContainer: {
-    alignItems: 'center',
+    paddingVertical: spacing.xs,
+    marginBottom: spacing.xs,
   },
   headerTitle: {
-    ...typography.title,
-    fontSize: 16,
+    ...typography.headingSm,
+    color: colors?.textPrimary ?? '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 18,
   },
-  headerSubtitle: {
-    ...typography.caption,
-    color: colors.textMuted,
-  },
-  mockToggle: {
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 4,
-    borderRadius: radii.sm,
-    backgroundColor: 'rgba(255, 255, 255, 0.08)',
-    borderWidth: 1,
-    borderColor: colors.glassBorder,
-  },
-  mockToggleActive: {
-    backgroundColor: 'rgba(34, 211, 238, 0.2)',
-    borderColor: colors.accentEnd,
-  },
-  mockToggleText: {
-    ...typography.pillLabel,
-    color: colors.accentEnd,
-    fontSize: 10,
+  backPlaceholder: {
+    width: 40,
   },
   scrollContent: {
-    paddingHorizontal: spacing.lg,
-    gap: spacing.md,
     paddingBottom: spacing.xxl,
   },
   payeeCard: {
-    padding: spacing.md,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.md,
+    marginBottom: spacing.md,
   },
   payeeRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.md,
   },
-  merchantAvatar: {
+  avatar: {
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+    backgroundColor: 'rgba(0, 245, 160, 0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 245, 160, 0.3)',
     alignItems: 'center',
     justifyContent: 'center',
+    marginRight: spacing.md,
   },
-  merchantAvatarText: {
-    fontSize: 20,
+  avatarText: {
+    ...typography.headingSm,
+    color: colors?.textPurpleLight ?? '#C4B5FD',
+    fontWeight: '700',
+    fontSize: 16,
   },
   payeeInfo: {
     flex: 1,
   },
   payeeName: {
-    ...typography.title,
-    fontSize: 15,
+    ...typography.bodyMedium,
+    color: colors?.textPrimary ?? '#FFFFFF',
+    fontWeight: '700',
   },
   payeeVpa: {
-    ...typography.captionMedium,
-    color: colors.textMuted,
-    fontFamily: 'monospace',
+    ...typography.caption,
+    color: colors?.textMuted ?? '#8E92A8',
     marginTop: 2,
+    fontFamily: 'monospace',
   },
-  badgeActive: {
+  modeBadge: {
+    backgroundColor: 'rgba(0, 217, 245, 0.15)',
     paddingHorizontal: spacing.sm,
-    paddingVertical: 2,
-    borderRadius: radii.pill,
-    backgroundColor: 'rgba(34, 211, 238, 0.12)',
-    borderWidth: 1,
-    borderColor: colors.accentEnd,
+    paddingVertical: 3,
+    borderRadius: radii?.pill ?? 9999,
   },
-  badgeActiveText: {
-    ...typography.pillLabel,
-    color: colors.accentEnd,
+  modeBadgeText: {
+    ...typography.caption,
+    fontSize: 10,
+    color: colors?.accentEnd ?? '#00D9F5',
+    fontWeight: '800',
   },
   progressCard: {
-    padding: spacing.lg,
-    gap: spacing.sm,
+    padding: spacing.md,
+    marginBottom: spacing.lg,
   },
-  progressHeaderRow: {
+  progressTextRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'baseline',
+    marginBottom: spacing.sm,
   },
-  progressMainText: {
-    ...typography.title,
-    fontSize: 18,
-    color: colors.textPrimary,
-  },
-  progressSubText: {
-    ...typography.body,
-    fontSize: 13,
-    color: colors.textMuted,
-  },
-  percentText: {
-    ...typography.captionMedium,
-    color: colors.accentEnd,
+  progressPaidText: {
+    ...typography.bodyMedium,
+    color: colors?.textPrimary ?? '#FFFFFF',
     fontWeight: '700',
+    fontSize: 14,
   },
-  progressBar: {
+  progressCountText: {
+    ...typography.caption,
+    color: colors?.textMuted ?? '#8E92A8',
+    fontSize: 12,
+  },
+  progressBarWrapper: {
     marginVertical: spacing.xs,
   },
-  progressFooterRow: {
+  progressBottomRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-  },
-  remainingText: {
-    ...typography.captionMedium,
-    color: colors.textMuted,
-  },
-  countText: {
-    ...typography.captionMedium,
-    color: colors.textFaint,
-  },
-  legListContainer: {
-    gap: spacing.sm,
+    alignItems: 'center',
     marginTop: spacing.xs,
   },
-  legListHeader: {
+  remainingText: {
+    ...typography.caption,
+    color: colors?.textMuted ?? '#8E92A8',
+    fontSize: 12,
+  },
+  subCapTag: {
+    ...typography.caption,
+    fontSize: 10,
+    color: colors?.textPurpleLight ?? '#C4B5FD',
+    fontWeight: '600',
+  },
+  legsListSection: {
+    gap: spacing.sm,
+  },
+  sectionHeader: {
     ...typography.captionMedium,
-    color: colors.textFaint,
+    color: colors?.textMuted ?? '#8E92A8',
     letterSpacing: 1.2,
-    marginBottom: 2,
+    fontSize: 11,
+    marginBottom: spacing.xs,
   },
   legRow: {
+    padding: spacing.md,
+    borderWidth: 1,
+    borderColor: colors?.glassBorder ?? 'rgba(255, 255, 255, 0.08)',
+  },
+  activeLegRow: {
+    borderColor: colors?.accentEnd ?? '#00D9F5',
+    backgroundColor: 'rgba(0, 217, 245, 0.04)',
+  },
+  successLegRow: {
+    borderColor: 'rgba(0, 245, 160, 0.25)',
+  },
+  failedLegRow: {
+    borderColor: 'rgba(239, 68, 68, 0.35)',
+  },
+  legMainContent: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    padding: spacing.md,
-    borderRadius: radii.row,
   },
-  legRowSuccess: {
-    borderColor: 'rgba(43, 217, 160, 0.25)',
-  },
-  legRowFailed: {
-    borderColor: 'rgba(255, 84, 112, 0.3)',
-  },
-  legRowUnknown: {
-    borderColor: 'rgba(255, 176, 32, 0.3)',
-  },
-  legRowLeft: {
+  legLeft: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.md,
     flex: 1,
   },
-  statusIndicator: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+  legIndexPill: {
+    width: 32,
+    height: 32,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  dotPending: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: colors.textFaint,
-  },
-  dotInProgress: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: colors.accentEnd,
-  },
-  iconSuccess: {
-    color: colors.success,
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  iconFailed: {
-    color: colors.danger,
-    fontSize: 14,
-    fontWeight: '700',
-  },
-  iconUnknown: {
-    color: colors.pending,
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  legDetails: {
-    flex: 1,
-  },
-  legTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.xs,
-  },
-  legTitle: {
-    ...typography.title,
-    fontSize: 14,
-  },
-  pillSuccess: {
-    paddingHorizontal: spacing.xs + 2,
-    paddingVertical: 1,
-    borderRadius: radii.sm,
-    backgroundColor: 'rgba(43, 217, 160, 0.15)',
-  },
-  pillSuccessText: {
-    ...typography.pillLabel,
-    color: colors.success,
-    fontSize: 10,
-  },
-  pillFailed: {
-    paddingHorizontal: spacing.xs + 2,
-    paddingVertical: 1,
-    borderRadius: radii.sm,
-    backgroundColor: 'rgba(255, 84, 112, 0.15)',
-  },
-  pillFailedText: {
-    ...typography.pillLabel,
-    color: colors.danger,
-    fontSize: 10,
-  },
-  pillUnknown: {
-    paddingHorizontal: spacing.xs + 2,
-    paddingVertical: 1,
-    borderRadius: radii.sm,
-    backgroundColor: 'rgba(255, 176, 32, 0.15)',
-  },
-  pillUnknownText: {
-    ...typography.pillLabel,
-    color: colors.pending,
-    fontSize: 10,
-  },
-  refText: {
+  legIndexText: {
     ...typography.caption,
-    fontFamily: 'monospace',
-    color: colors.textFaint,
-    fontSize: 11,
-    marginTop: 2,
-  },
-  unknownBox: {
-    marginTop: spacing.xs,
-    padding: spacing.xs,
-    backgroundColor: 'rgba(255, 176, 32, 0.08)',
-    borderRadius: radii.sm,
-  },
-  unknownPrompt: {
-    ...typography.caption,
-    color: colors.pending,
-    fontSize: 11,
-    marginBottom: spacing.xs,
-  },
-  unknownActions: {
-    flexDirection: 'row',
-    gap: spacing.sm,
-  },
-  unknownBtnYes: {
-    backgroundColor: colors.success,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 4,
-    borderRadius: radii.sm,
-  },
-  unknownBtnNo: {
-    backgroundColor: colors.danger,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 4,
-    borderRadius: radii.sm,
-  },
-  unknownBtnText: {
-    ...typography.pillLabel,
-    color: '#07070B',
+    color: colors?.textPrimary ?? '#FFFFFF',
     fontWeight: '700',
-  },
-  legRowRight: {
-    alignItems: 'flex-end',
+    fontSize: 11,
   },
   legAmount: {
     ...typography.bodyMedium,
-    fontWeight: '600',
+    color: colors?.textPrimary ?? '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 15,
   },
-  retryButton: {
+  legRefText: {
+    ...typography.caption,
+    color: colors?.textPurpleLight ?? '#C4B5FD',
+    fontSize: 11,
+    fontFamily: 'monospace',
     marginTop: 2,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 2,
-    borderRadius: radii.sm,
-    backgroundColor: colors.dangerFill,
+    maxWidth: 200,
+  },
+  legStatusLabel: {
+    ...typography.caption,
+    color: colors?.textMuted ?? '#8E92A8',
+    fontSize: 12,
+    marginTop: 1,
+  },
+  legRight: {
+    alignItems: 'flex-end',
+  },
+  pendingDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: colors?.textFaint ?? '#5A5F73',
+  },
+  inProgressDot: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: colors?.accentEnd ?? '#00D9F5',
+  },
+  statusSuccessIcon: {
+    color: colors?.success ?? '#2BD9A0',
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  statusUnknownIcon: {
+    color: colors?.warning ?? '#FFB020',
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  retryBadge: {
+    backgroundColor: 'rgba(239, 68, 68, 0.15)',
     borderWidth: 1,
-    borderColor: colors.dangerBorder,
+    borderColor: 'rgba(239, 68, 68, 0.35)',
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 4,
+    borderRadius: radii?.pill ?? 9999,
   },
-  retryText: {
-    ...typography.pillLabel,
-    color: colors.danger,
+  retryBadgeText: {
+    ...typography.caption,
+    color: colors?.danger ?? '#EF4444',
+    fontWeight: '700',
+    fontSize: 11,
   },
-  footer: {
-    paddingHorizontal: spacing.lg,
+  unknownPromptBox: {
+    marginTop: spacing.md,
     paddingTop: spacing.sm,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 255, 255, 0.08)',
+  },
+  unknownPromptText: {
+    ...typography.body,
+    color: colors?.warning ?? '#FFB020',
+    fontSize: 13,
+    marginBottom: spacing.sm,
+  },
+  unknownButtonsRow: {
+    flexDirection: 'row',
     gap: spacing.sm,
   },
-  secondaryActionsRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingHorizontal: spacing.xs,
+  unknownBtn: {
+    flex: 1,
+    paddingVertical: spacing.sm,
+    borderRadius: radii?.button ?? 14,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  secondaryBtn: {
+  unknownYesBtn: {
+    backgroundColor: 'rgba(0, 245, 160, 0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 245, 160, 0.3)',
+  },
+  unknownYesText: {
+    ...typography.caption,
+    color: colors?.success ?? '#2BD9A0',
+    fontWeight: '700',
+  },
+  unknownNoBtn: {
+    backgroundColor: 'rgba(239, 68, 68, 0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(239, 68, 68, 0.3)',
+  },
+  unknownNoText: {
+    ...typography.caption,
+    color: colors?.danger ?? '#EF4444',
+    fontWeight: '700',
+  },
+  footer: {
+    paddingVertical: spacing.md,
+    gap: spacing.sm,
+  },
+  secondaryActions: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: spacing.xl,
+    marginTop: spacing.xs,
+  },
+  secondaryButton: {
     paddingVertical: spacing.xs,
     paddingHorizontal: spacing.md,
   },
-  secondaryBtnText: {
-    ...typography.captionMedium,
-    color: colors.textMuted,
+  secondaryButtonText: {
+    ...typography.bodyMedium,
+    color: colors?.textMuted ?? '#8E92A8',
+    fontSize: 14,
+  },
+  abandonText: {
+    color: colors?.danger ?? '#EF4444',
   },
   sheetBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.75)',
+    backgroundColor: 'rgba(4, 5, 8, 0.75)',
     justifyContent: 'flex-end',
   },
-  sheetDismissArea: {
-    flex: 1,
-  },
-  sheetContent: {
-    borderTopLeftRadius: 32,
-    borderTopRightRadius: 32,
-    borderBottomLeftRadius: 0,
-    borderBottomRightRadius: 0,
-    padding: spacing.lg,
-    maxHeight: '65%',
-  },
-  sheetHeader: {
-    alignItems: 'center',
-    marginBottom: spacing.md,
+  sheetCard: {
+    backgroundColor: '#13141F',
+    borderTopLeftRadius: radii?.card ?? 24,
+    borderTopRightRadius: radii?.card ?? 24,
+    borderTopWidth: 1,
+    borderLeftWidth: 1,
+    borderRightWidth: 1,
+    borderColor: colors?.glassBorder ?? 'rgba(255, 255, 255, 0.08)',
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.md,
+    maxHeight: '75%',
   },
   sheetHandle: {
-    width: 40,
+    width: 36,
     height: 4,
     borderRadius: 2,
     backgroundColor: 'rgba(255, 255, 255, 0.2)',
-    marginBottom: spacing.sm,
+    alignSelf: 'center',
+    marginBottom: spacing.md,
+  },
+  sheetHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: spacing.md,
   },
   sheetTitle: {
-    ...typography.title,
-    fontSize: 17,
+    ...typography.headingSm,
+    color: colors?.textPrimary ?? '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 18,
   },
   sheetSubtitle: {
     ...typography.caption,
-    color: colors.textMuted,
+    color: colors?.textMuted ?? '#8E92A8',
     marginTop: 2,
   },
-  sheetAppList: {
-    marginVertical: spacing.xs,
+  sheetCloseButton: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  emptyAppsContainer: {
-    padding: spacing.xl,
+  sheetCloseText: {
+    color: colors?.textMuted ?? '#8E92A8',
+    fontSize: 12,
+  },
+  sheetLoading: {
+    paddingVertical: spacing.xl,
     alignItems: 'center',
   },
+  sheetLoadingText: {
+    ...typography.caption,
+    color: colors?.textMuted ?? '#8E92A8',
+  },
+  emptyAppsContainer: {
+    alignItems: 'center',
+    paddingVertical: spacing.xxl,
+    paddingHorizontal: spacing.lg,
+  },
+  emptyAppsIconWrapper: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: 'rgba(245, 158, 11, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(245, 158, 11, 0.3)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: spacing.md,
+  },
   emptyAppsTitle: {
-    ...typography.title,
-    color: colors.danger,
-    textAlign: 'center',
+    ...typography.bodyMedium,
+    color: colors?.textPrimary ?? '#FFFFFF',
+    fontWeight: '700',
     marginBottom: spacing.xs,
   },
-  emptyAppsSub: {
+  emptyAppsSubtitle: {
     ...typography.caption,
-    color: colors.textMuted,
+    color: colors?.textMuted ?? '#8E92A8',
     textAlign: 'center',
+  },
+  appsList: {
+    marginVertical: spacing.xs,
   },
   appItem: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingVertical: spacing.md,
-    paddingHorizontal: spacing.sm,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(255, 255, 255, 0.05)',
-  },
-  appItemPinned: {
+    paddingHorizontal: spacing.md,
+    borderRadius: radii?.row ?? 12,
+    marginBottom: spacing.xs,
     backgroundColor: 'rgba(255, 255, 255, 0.03)',
-    borderRadius: radii.row,
+  },
+  pinnedAppItem: {
+    backgroundColor: 'rgba(0, 245, 160, 0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 245, 160, 0.2)',
   },
   appItemLeft: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.md,
   },
-  appIconContainer: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: colors.accentStart,
-    alignItems: 'center',
-    justifyContent: 'center',
+  appColorDot: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
   },
-  appInitial: {
-    color: '#FFFFFF',
-    fontWeight: '700',
-    fontSize: 16,
+  installedAppIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 8,
   },
   appLabel: {
     ...typography.bodyMedium,
-    color: colors.textPrimary,
+    color: colors?.textPrimary ?? '#FFFFFF',
+    fontWeight: '600',
+    fontSize: 15,
   },
   pinnedLabel: {
     ...typography.caption,
-    color: colors.accentEnd,
+    color: colors?.textPurpleLight ?? '#C4B5FD',
     fontSize: 11,
+    marginTop: 1,
   },
-  appPkgMuted: {
-    ...typography.caption,
-    color: colors.textFaint,
-    fontSize: 10,
-  },
-  appArrow: {
-    color: colors.textMuted,
+  appPayArrow: {
+    ...typography.bodyMedium,
+    color: colors?.textMuted ?? '#8E92A8',
     fontSize: 18,
-  },
-  sheetCancelBtn: {
-    paddingVertical: spacing.md,
-    alignItems: 'center',
-    marginTop: spacing.sm,
-  },
-  sheetCancelText: {
-    ...typography.captionMedium,
-    color: colors.textMuted,
   },
 });

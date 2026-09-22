@@ -73,4 +73,8 @@ scratch/
 !.yarn/plugins
 !.yarn/releases
 !.yarn/sdks
-!.yarn/versions
+# Releases
+release/
+*.apk
+.vscode/
+

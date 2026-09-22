@@ -7,4 +7,30 @@
 # For more details, see
 #   http://developer.android.com/guide/developing/tools/proguard.html
 
-# Add any project specific keep options here:
+# Add project specific keep options here:
+
+# Keep our native module bridge
+-keep class com.nasa.nofeepe.** { *; }
+
+# React Native JNI & TurboModules
+-keep class com.facebook.react.** { *; }
+-keep class com.facebook.jni.** { *; }
+
+# Reanimated & Worklets
+-keep class com.swmansion.reanimated.** { *; }
+
+# VisionCamera & Nitro
+-keep class com.mrousavy.camera.** { *; }
+-keep class com.margelo.nitro.** { *; }
+
+# Google ML Kit Barcode Scanning
+-keep class com.google.mlkit.** { *; }
+-keep class com.google.android.gms.tasks.** { *; }
+
+# Keep native methods
+-keepclasseswithmembernames class * {
+    native <methods>;
+}
+
+# Keep annotations
+-keepattributes *Annotation*,InnerClasses,EnclosingMethod,Signature,Exceptions

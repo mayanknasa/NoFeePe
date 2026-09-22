@@ -17,6 +17,11 @@ interface ProgressBarProps {
   segmented?: boolean;
 }
 
+/**
+ * Animated Progress Bar component per Section 4.5 and Section 12.
+ * Animates smoothly over 300ms with bezier easing and zero spring overshoot.
+ * Supports continuous linear fill or segmented installment steps.
+ */
 export const ProgressBar: React.FC<ProgressBarProps> = ({
   progress,
   totalSegments,
@@ -24,21 +29,25 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
   style,
   segmented = false,
 }) => {
-  // Clamp progress between 0 and 1
-  const clampedProgress = Math.min(Math.max(progress, 0), 1);
+  // Clamp progress strictly between 0 and 1; handle NaN gracefully
+  const safeProgress = typeof progress === 'number' && !isNaN(progress) ? progress : 0;
+  const clampedProgress = Math.min(Math.max(safeProgress, 0), 1);
   const animatedProgress = useSharedValue(clampedProgress);
 
   useEffect(() => {
-    // 300ms, no overshoot per Section 12
-    animatedProgress.value = withTiming(clampedProgress, {
-      duration: motion.progressDuration,
-      easing: Easing.bezier(0.22, 1, 0.36, 1),
-    });
+    try {
+      animatedProgress.value = withTiming(clampedProgress, {
+        duration: motion?.progressDuration ?? 300,
+        easing: Easing.bezier(0.22, 1, 0.36, 1),
+      });
+    } catch (err: unknown) {
+      console.warn('[ProgressBar] Animation error:', err);
+    }
   }, [clampedProgress, animatedProgress]);
 
   const animatedStyle = useAnimatedStyle(() => {
     return {
-      width: `${animatedProgress.value * 100}%`,
+      width: `${(animatedProgress.value ?? 0) * 100}%`,
     };
   });
 
@@ -54,13 +63,13 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
             <View key={idx} style={styles.segmentTrack}>
               {isCompleted ? (
                 <LinearGradient
-                  colors={colors.accentGradient as unknown as string[]}
+                  colors={[...(colors?.accentGradient ?? ['#00F5A0', '#00D9F5'])]}
                   start={{ x: 0, y: 0 }}
                   end={{ x: 1, y: 0 }}
                   style={styles.segmentFill}
                 />
               ) : isCurrent ? (
-                <View style={[styles.segmentFill, { backgroundColor: colors.pending }]} />
+                <View style={[styles.segmentFill, { backgroundColor: colors?.pending ?? '#8E92A8' }]} />
               ) : null}
             </View>
           );
@@ -73,7 +82,7 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
     <View style={[styles.track, style]}>
       <Animated.View style={[styles.fillContainer, animatedStyle]}>
         <LinearGradient
-          colors={colors.accentGradient as unknown as string[]}
+          colors={[...(colors?.accentGradient ?? ['#00F5A0', '#00D9F5'])]}
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 0 }}
           style={styles.gradientFill}
@@ -87,13 +96,13 @@ const styles = StyleSheet.create({
   track: {
     height: 8,
     backgroundColor: 'rgba(255, 255, 255, 0.08)',
-    borderRadius: radii.pill,
+    borderRadius: radii?.pill ?? 9999,
     overflow: 'hidden',
     width: '100%',
   },
   fillContainer: {
     height: '100%',
-    borderRadius: radii.pill,
+    borderRadius: radii?.pill ?? 9999,
     overflow: 'hidden',
   },
   gradientFill: {
@@ -110,7 +119,7 @@ const styles = StyleSheet.create({
     flex: 1,
     height: 6,
     backgroundColor: 'rgba(255, 255, 255, 0.08)',
-    borderRadius: radii.pill,
+    borderRadius: radii?.pill ?? 9999,
     overflow: 'hidden',
   },
   segmentFill: {

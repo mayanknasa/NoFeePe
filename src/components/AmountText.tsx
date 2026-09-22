@@ -12,28 +12,47 @@ interface AmountTextProps {
 }
 
 /**
- * Formats paise into Indian Rupee string with proper digit grouping (en-IN).
- * e.g. 10000000 paise -> "1,00,000.00"
+ * Formats integer paise into Indian Rupee string with proper digit grouping (en-IN).
+ * e.g. 10000000 paise -> { rupeePart: "1,00,000", decimalPart: "00" }
+ *
+ * Guarded against NaN, undefined, or null inputs to guarantee zero crashes.
  */
 export function formatIndianCurrency(
   paise: number,
-  options?: { showZeroDecimals?: boolean }
+  _options?: { showZeroDecimals?: boolean }
 ): { rupeePart: string; decimalPart: string } {
-  const isNegative = paise < 0;
-  const absPaise = Math.abs(Math.round(paise));
-  const rupees = Math.floor(absPaise / 100);
-  const decimals = absPaise % 100;
+  try {
+    if (typeof paise !== 'number' || isNaN(paise)) {
+      return { rupeePart: '0', decimalPart: '00' };
+    }
 
-  // Format rupee part using Indian numbering (e.g. 1,00,000)
-  const rupeePart = new Intl.NumberFormat('en-IN').format(rupees);
-  const decimalPart = decimals.toString().padStart(2, '0');
+    const isNegative = paise < 0;
+    const absPaise = Math.abs(Math.round(paise));
+    const rupees = Math.floor(absPaise / 100);
+    const decimals = absPaise % 100;
 
-  return {
-    rupeePart: `${isNegative ? '-' : ''}${rupeePart}`,
-    decimalPart,
-  };
+    // Format rupee part using Indian numbering system (e.g. 1,00,000)
+    let rupeePart = '0';
+    try {
+      rupeePart = new Intl.NumberFormat('en-IN').format(rupees);
+    } catch {
+      rupeePart = rupees.toString();
+    }
+    const decimalPart = decimals.toString().padStart(2, '0');
+
+    return {
+      rupeePart: `${isNegative ? '-' : ''}${rupeePart}`,
+      decimalPart,
+    };
+  } catch (err: unknown) {
+    console.warn('[AmountText] formatIndianCurrency fallback triggered:', err);
+    return { rupeePart: '0', decimalPart: '00' };
+  }
 }
 
+/**
+ * Visual currency display component with large rupee numerals and muted decimals.
+ */
 export const AmountText: React.FC<AmountTextProps> = ({
   amountPaise,
   size = 'md',
@@ -53,6 +72,7 @@ export const AmountText: React.FC<AmountTextProps> = ({
       case 'md':
         return 20;
       case 'sm':
+      default:
         return 15;
     }
   };
@@ -93,16 +113,16 @@ const styles = StyleSheet.create({
     alignItems: 'baseline',
   },
   symbol: {
-    color: colors.textMuted,
+    color: colors?.textMuted ?? '#8E92A8',
     fontWeight: '600',
     marginRight: 2,
   },
   rupeeText: {
     ...typography.currencyDisplay,
-    color: colors.textPrimary,
+    color: colors?.textPrimary ?? '#FFFFFF',
   },
   decimalText: {
     ...typography.currencyDisplay,
-    color: colors.textMuted,
+    color: colors?.textMuted ?? '#8E92A8',
   },
 });

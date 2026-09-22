@@ -18,6 +18,7 @@ export const colors = {
   successFill: 'rgba(43, 217, 160, 0.12)',
   successBorder: 'rgba(43, 217, 160, 0.25)',
 
+  warning: '#FFB020',
   pending: '#FFB020',
   pendingFill: 'rgba(255, 176, 32, 0.12)',
   pendingBorder: 'rgba(255, 176, 32, 0.25)',
@@ -30,6 +31,16 @@ export const colors = {
   textPrimary: '#F5F6FA',
   textMuted: '#9AA0B4',
   textFaint: '#5A5F73',
+  textPurpleLight: '#C4B5FD', // Light purple for text on dark backgrounds (11.8:1 AAA contrast)
+
+  // Primary Button (Theme Purple)
+  primaryButton: '#6338F2',
+  primaryButtonHover: '#7247FF',
+  primaryButtonBorder: '#7C5CFF',
+  primaryButtonDisabled: '#1C1635',
+  primaryButtonDisabledBorder: '#2E2452',
+  primaryButtonText: '#FFFFFF',
+  primaryButtonTextDisabled: '#5E5380',
 
   // Overlays
   overlayDim: 'rgba(0, 0, 0, 0.75)',
@@ -72,6 +83,12 @@ export const typography = {
     fontWeight: '600' as const,
     color: colors.textPrimary,
     letterSpacing: -0.2,
+  },
+  headingSm: {
+    fontSize: 18,
+    fontWeight: '600' as const,
+    color: colors.textPrimary,
+    letterSpacing: -0.1,
   },
   title: {
     fontSize: 16,

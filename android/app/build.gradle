@@ -57,7 +57,7 @@ react {
 /**
  * Set this to true to Run Proguard on Release builds to minify the Java bytecode.
  */
-def enableProguardInReleaseBuilds = false
+def enableProguardInReleaseBuilds = true
 
 /**
  * The preferred build flavor of JavaScriptCore (JSC)
@@ -116,4 +116,8 @@ dependencies {
     } else {
         implementation jscFlavor
     }
+
+    // Google Play Services ML Kit Barcode Scanning (zero binary bloat, fast on-device QR scanning)
+    implementation 'com.google.android.gms:play-services-mlkit-barcode-scanning:18.3.1'
 }
+

@@ -9,6 +9,8 @@ export type Leg = {
   approvalRef?: string;
   completedAt?: number;
   rawResponse?: string;
+  packageName?: string;
+  appLabel?: string;
 };
 
 export type PaymentMode = 'direct' | 'split';
@@ -31,6 +33,20 @@ export type UpiAppInfo = {
   packageName: string;
   label: string;
   brandColor?: string;
+  iconBase64?: string;
+};
+
+export type TransactionRecord = {
+  id: string;
+  payeeName: string;
+  payeeVpa: string;
+  totalPaise: number;
+  mode: PaymentMode;
+  status: 'SUCCESS' | 'PARTIAL';
+  timestamp: number;
+  legs: Leg[];
+  firstTxnId?: string;
+  primaryAppLabel?: string;
 };
 
 export type UpiPaymentResult = {
@@ -44,6 +60,8 @@ export type UpiPaymentResult = {
 export type RootStackParamList = {
   Splash: undefined;
   Scanner: undefined;
+  History: undefined;
+  About: undefined;
   Amount: {
     payeeVpa: string;
     payeeName?: string | null;
@@ -58,3 +76,4 @@ export type RootStackParamList = {
     partial?: boolean;
   };
 };
+
